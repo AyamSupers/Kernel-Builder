@@ -1,0 +1,50 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index 4aad0683..eb50d7c4 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -98,7 +98,7 @@ ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+ ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
+ 
+ ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
+-$(info -- Supported Unofficial Manager: MKSU, RKSU, KOWSU, SukiSU-Ultra, ReSukiSU )
++$(info -- Supported Unofficial Manager: MKSU, RKSU, KOWSU, SukiSU-Ultra, ReSukiSU, KernelSU(backslashxx), MamboSU)
+ endif
+ 
+ KERNEL_VERSION := $(VERSION).$(PATCHLEVEL)
+diff --git a/kernel/manager/apk_sign.c b/kernel/manager/apk_sign.c
+index b87461da..87a68718 100644
+--- a/kernel/manager/apk_sign.c
++++ b/kernel/manager/apk_sign.c
+@@ -34,11 +34,12 @@ struct sdesc {
+ static apk_sign_key_t apk_sign_keys[] = {
+     { EXPECTED_SIZE_RESUKISU, EXPECTED_HASH_RESUKISU }, /* ReSukiSU/ReSukiSU */
+ #ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
+-    { EXPECTED_SIZE_OFFICIAL, EXPECTED_HASH_OFFICIAL }, // tiann/KernelSU
+     { EXPECTED_SIZE_5EC1CFF, EXPECTED_HASH_5EC1CFF }, // 5ec1cff/KernelSU
+     { EXPECTED_SIZE_RSUNTK, EXPECTED_HASH_RSUNTK }, // rsuntk/KernelSU
+     { EXPECTED_SIZE_SUKISU, EXPECTED_HASH_SUKISU }, // SukiSU-Ultra/SukiSU-Ultra
+     { EXPECTED_SIZE_KOWX712, EXPECTED_HASH_KOWX712 }, // KOWX712/KernelSU
++    { EXPECTED_SIZE_RAPLIVX, EXPECTED_HASH_RAPLIVX }, // RapliVx/MamboSU
++    { EXPECTED_SIZE_BACKSLASHXX, EXPECTED_HASH_BACKSLASHXX }, // backslashxx/KernelSU
+ #ifdef EXPECTED_SIZE
+     { EXPECTED_SIZE, EXPECTED_HASH }, // Custom
+ #endif
+diff --git a/kernel/manager/manager_sign.h b/kernel/manager/manager_sign.h
+index 87e78338..53cf5a8c 100644
+--- a/kernel/manager/manager_sign.h
++++ b/kernel/manager/manager_sign.h
+@@ -25,6 +25,14 @@
+ #define EXPECTED_SIZE_KOWX712 0x375
+ #define EXPECTED_HASH_KOWX712 "484fcba6e6c43b1fb09700633bf2fb4758f13cb0b2f4457b80d075084b26c588"
+ 
++// RapliVx/MamboSU
++#define EXPECTED_SIZE_RAPLIVX 0x384
++#define EXPECTED_HASH_RAPLIVX "a9462b8b98ea1ca7901b0cbdcebfaa35f0aa95e51b01d66e6b6d2c81b97746d8"
++
++// backslashxx/KernelSU
++#define EXPECTED_SIZE_BACKSLASHXX 0x363
++#define EXPECTED_HASH_BACKSLASHXX "4359c171f32543394cbc23ef908c4bb94cad7c8087002ba164c8230948c21549"
++
+ typedef struct {
+     unsigned size;
+     const char *sha256;

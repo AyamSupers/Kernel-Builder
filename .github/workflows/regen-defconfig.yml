@@ -1,0 +1,98 @@
+name: Regenerate Defconfig
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'URL repo kernel'
+        required: false
+        default: ''
+      kernel_branch:
+        description: 'Branch kernel (default: main)'
+        required: false
+        default: 'main'
+      output_name:
+        description: 'Output filename (e.g., redpanda_defconfig)'
+        required: false
+        default: 'redpanda_defconfig'
+
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 git curl libelf-dev build-essential flex bison \
+            libssl-dev libncurses-dev zlib1g-dev bc dwarves
+
+      - name: Clone kernel source
+        run: |
+          REPO="${{ github.event.inputs.kernel_repo }}"
+          BRANCH="${{ github.event.inputs.kernel_branch }}"
+          git clone --depth=1 "$REPO" -b "$BRANCH" kernel_workspace
+
+      - name: Cache Neutron Clang
+        id: clang-cache
+        uses: actions/cache@v6
+        with:
+          path: toolchains/clang
+          key: neutron-clang-full-v2
+
+      - name: Download & verify Neutron Clang
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p toolchains/clang && cd toolchains/clang
+
+          if [ -x bin/clang ] && ./bin/clang --version >/dev/null 2>&1; then
+            echo "Clang dari cache valid, lewati unduhan."
+          else
+            echo "Cache kosong/rusak, unduh ulang Neutron Clang..."
+            rm -rf ./*
+            curl -LO "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman"
+            chmod +x antman
+            ./antman -S latest
+            ./antman --patch=glibc
+          fi
+
+          ./bin/clang --version
+
+      - name: Download defconfig & regenerate
+        run: |
+          export PATH="$GITHUB_WORKSPACE/toolchains/clang/bin:$PATH"
+          MAKE="make O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1"
+
+          REPO_PATH="${REPO_INPUT#https://github.com/}"
+          REPO_PATH="${REPO_PATH#http://github.com/}"
+          REPO_PATH="${REPO_PATH#git@github.com:}"
+          REPO_PATH="${REPO_PATH%.git}"
+
+          DEFCONFIG_URL="https://raw.githubusercontent.com/${REPO_PATH}/${{ github.event.inputs.kernel_branch }}/arch/arm64/configs/gki_defconfig"
+          echo "DEFCONFIG_URL = $DEFCONFIG_URL"
+
+          cd kernel_workspace
+
+          DEFCONFIG_NAME="$(basename "$DEFCONFIG_URL")"
+          DEFCONFIG="arch/arm64/configs/${DEFCONFIG_NAME}"
+
+          curl -fLSs "$DEFCONFIG_URL" -o "$DEFCONFIG" || {
+            echo "::error::Gagal mengunduh $DEFCONFIG_URL"
+            exit 1
+          }
+
+          $MAKE "$DEFCONFIG_NAME"
+          OUTPUT_NAME="${{ github.event.inputs.output_name }}"
+          cp out/.config "out/${OUTPUT_NAME}"
+
+          echo "=== Info hasil regenerate ==="
+          echo "Baris defconfig awal : $(wc -l < "$DEFCONFIG")"
+          echo "Baris full .config   : $(wc -l < "out/${OUTPUT_NAME}")"
+
+      - name: Upload hasil regenerate
+        uses: actions/upload-artifact@v7
+        with:
+          name: regenerated-defconfig
+          path: "kernel_workspace/out/${{ github.event.inputs.output_name }}"
+          if-no-files-found: error

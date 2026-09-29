@@ -1,0 +1,323 @@
+name: Workflow and Cache Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      workflow_name:
+        type: choice
+        description: 'Cleanup workflow name'
+        required: true
+        default: 'Build RedPanda GKI Kernel'
+        options:
+          - Build RedPanda GKI Kernel
+          - Build Testing Kernel
+      cache_mode:
+        type: choice
+        description: 'Cache Cleanup Type'
+        required: false
+        default: 'none'
+        options:
+          - none
+          - all
+          - clang
+          - ccache
+          - apt-cache
+          - thinlto-cache
+      count:
+        description: 'Maximum total number of deleted records'
+        required: false
+        default: '20'
+      delete_failed:
+        description: 'Delete failed run records for the specified workflow？'
+        required: false
+        type: boolean
+        default: false
+      delete_success:
+        description: 'Delete successful run records for the specified workflow？'
+        required: false
+        type: boolean
+        default: false
+      delete_cancelled:
+        description: 'Delete run records for cancelled runs of the specified workflow？'
+        required: false
+        type: boolean
+        default: false
+      reverse_order:
+        description: 'Start cleaning from oldest to newest?'
+        required: false
+        type: boolean
+        default: false
+      cancel_all:
+        description: 'Do you want to cancel all runs of the specified workflow with a single click?'
+        required: false
+        type: boolean
+        default: false
+      target_run_numbers:
+        description: 'Delete by run number'
+        required: false
+        default: ''
+      target_run_ids:
+        description: 'Delete by Run-ID'
+        required: false
+        default: ''
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup-workflow:
+    runs-on: ubuntu-latest
+    if: >-
+      ${{ inputs.cancel_all
+       || inputs.delete_failed
+       || inputs.delete_success
+       || inputs.delete_cancelled
+       || inputs.target_run_numbers != ''
+       || inputs.target_run_ids != '' }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Delete by Run Number
+        if: ${{ inputs.target_run_numbers != '' }}
+        env:
+          WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          TARGET_RUN_NUMBERS: ${{ inputs.target_run_numbers }}
+        run: |
+          set -e
+          echo "Precision Mode - Delete by Run Number: $TARGET_RUN_NUMBERS"
+
+          IFS=',' read -ra NUM_LIST <<< "$TARGET_RUN_NUMBERS"
+          for RAW_NUM in "${NUM_LIST[@]}"; do
+            NUM=$(echo "$RAW_NUM" | tr -d ' #')
+            [ -z "$NUM" ] && continue
+
+            echo "Searching for run number #${NUM}..."
+            LINE=$(gh run list \
+              --repo "$REPO" \
+              --workflow "$WORKFLOW_NAME" \
+              --limit 300 \
+              --json databaseId,number,status,conclusion \
+              --jq ".[] | select(.number == $NUM) | [.status, .conclusion, (.databaseId | tostring)] | join(\" \")")
+
+            if [ -z "$LINE" ]; then
+              echo "⚠️ Run ID #${NUM} not found; skipping."
+              continue
+            fi
+
+            STATE=$(echo "$LINE"      | awk '{print $1}')
+            CONCLUSION=$(echo "$LINE" | awk '{print $2}')
+            RUN_ID=$(echo "$LINE"     | awk '{print $3}')
+
+            if [[ "$STATE" == "in_progress" || "$STATE" == "queued" || "$STATE" == "waiting" ]]; then
+              echo "#${NUM} (ID: $RUN_ID) is still running ($STATE); skipping."
+            else
+              echo "Deleting #${NUM} (ID: $RUN_ID, conclusion: $CONCLUSION)..."
+              gh run delete "$RUN_ID" --repo "$REPO" \
+                && echo "✅ Deleted #${NUM}" \
+                || echo "❌ Deletion failed #${NUM}"
+            fi
+          done
+
+      - name: Delete by Run ID
+        if: ${{ inputs.target_run_ids != '' }}
+        env:
+          TARGET_RUN_IDS: ${{ inputs.target_run_ids }}
+        run: |
+          set -e
+          echo "Precision Mode - Delete by Run ID: $TARGET_RUN_IDS"
+
+          IFS=',' read -ra ID_LIST <<< "$TARGET_RUN_IDS"
+          for RAW_ID in "${ID_LIST[@]}"; do
+            RID=$(echo "$RAW_ID" | tr -d ' ')
+            [ -z "$RID" ] && continue
+
+            echo "Querying Run ID $RID..."
+            LINE=$(gh run view "$RID" \
+              --repo "$REPO" \
+              --json status,conclusion,number \
+              --jq '[.status, .conclusion, (.number | tostring)] | join(" ")' \
+              2>/dev/null || true)
+
+            if [ -z "$LINE" ]; then
+              echo "⚠️ Run ID $RID does not exist or access is denied; skipping."
+              continue
+            fi
+
+            STATE=$(echo "$LINE"      | awk '{print $1}')
+            CONCLUSION=$(echo "$LINE" | awk '{print $2}')
+            RUN_NUMBER=$(echo "$LINE" | awk '{print $3}')
+
+            if [[ "$STATE" == "in_progress" || "$STATE" == "queued" || "$STATE" == "waiting" ]]; then
+              echo "ID $RID (#${RUN_NUMBER}) is still running ($STATE); skipping."
+            else
+              echo "Deleting ID $RID (#${RUN_NUMBER}, conclusion: $CONCLUSION)..."
+              gh run delete "$RID" --repo "$REPO" \
+                && echo "✅ Deleted ID $RID" \
+                || echo "❌ Deletion failed for ID $RID"
+            fi
+          done
+
+      - name: Batch Cancel and Delete
+        if: >-
+          ${{ inputs.target_run_numbers == ''
+           && inputs.target_run_ids == ''
+           && (inputs.cancel_all
+            || inputs.delete_failed
+            || inputs.delete_success
+            || inputs.delete_cancelled) }}
+        env:
+          WORKFLOW_NAME: ${{ inputs.workflow_name }}
+          COUNT: ${{ inputs.count }}
+          DELETE_FAILED: ${{ inputs.delete_failed }}
+          DELETE_SUCCESS: ${{ inputs.delete_success }}
+          DELETE_CANCELLED: ${{ inputs.delete_cancelled }}
+          REVERSE_ORDER: ${{ inputs.reverse_order }}
+          CANCEL_ALL: ${{ inputs.cancel_all }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -e
+          if [[ "$CANCEL_ALL" == "true" ]]; then
+            echo "Batch Mode - Cancel all running/queued runs..."
+            CANCEL_COUNT=0
+            for STATUS_FILTER in in_progress queued waiting; do
+              while IFS= read -r RUN_ID; do
+                [ -z "$RUN_ID" ] && continue
+                [[ "$RUN_ID" == "$CURRENT_RUN_ID" ]] && continue
+                echo "Cancellation ID: $RUN_ID"
+                gh run cancel "$RUN_ID" --repo "$REPO" \
+                  && CANCEL_COUNT=$((CANCEL_COUNT + 1)) \
+                  || echo "Cancellation failed: $RUN_ID"
+              done < <(gh run list \
+                --repo "$REPO" \
+                --workflow "$WORKFLOW_NAME" \
+                --status "$STATUS_FILTER" \
+                --limit 200 \
+                --json databaseId \
+                --jq '.[].databaseId | tostring')
+            done
+            echo "$CANCEL_COUNT runs have been cancelled."
+          fi
+          [[ "$REVERSE_ORDER" == "true" ]] && SORT_CMD="sort -k2" || SORT_CMD="sort -k2 -r"
+
+          TOTAL_DELETED=0
+          for CONCLUSION in failure success cancelled; do
+            case "$CONCLUSION" in
+              failure)   [[ "$DELETE_FAILED"    != "true" ]] && continue ;;
+              success)   [[ "$DELETE_SUCCESS"   != "true" ]] && continue ;;
+              cancelled) [[ "$DELETE_CANCELLED" != "true" ]] && continue ;;
+            esac
+
+            [ "$TOTAL_DELETED" -ge "$COUNT" ] && break
+            echo "Batch Mode - Processing conclusion type: $CONCLUSION (Global remaining quota: $((COUNT - TOTAL_DELETED)) items)..."
+
+            while IFS=' ' read -r RUN_ID _STARTED; do
+              [ -z "$RUN_ID" ] && continue
+              [[ "$RUN_ID" == "$CURRENT_RUN_ID" ]] && continue
+              [ "$TOTAL_DELETED" -ge "$COUNT" ] && break 2
+              echo "Delete ID: $RUN_ID"
+              gh run delete "$RUN_ID" --repo "$REPO" \
+                && TOTAL_DELETED=$((TOTAL_DELETED + 1)) \
+                || echo "❌ Deletion failed: $RUN_ID"
+            done < <(gh run list \
+              --repo "$REPO" \
+              --workflow "$WORKFLOW_NAME" \
+              --limit 200 \
+              --json databaseId,startedAt,conclusion \
+              --jq ".[] | select(.conclusion == \"$CONCLUSION\") | [(.databaseId | tostring), .startedAt] | join(\" \")" \
+              | $SORT_CMD)
+
+            echo "Processed type $CONCLUSION; total deleted so far: $TOTAL_DELETED."
+          done
+
+          echo "✅ Batch deletion complete; a total of $TOTAL_DELETED items were deleted (limit: $COUNT)."
+
+  cleanup-caches:
+    runs-on: ubuntu-latest
+    if: ${{ inputs.cache_mode != 'none' }}
+    permissions:
+      actions: write
+    steps:
+      - name: Clean caches by mode
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const mode = '${{ inputs.cache_mode }}';
+            console.log(`🔹 Current cache clearing mode: ${mode}`);
+
+            let totalDeleted = 0;
+            let totalFound = 0;
+            let page = 1;
+
+            while (true) {
+              const res = await github.rest.actions.getActionsCacheList({
+                owner, repo, per_page: 100, page
+              });
+              const caches = res.data.actions_caches;
+              if (!caches || caches.length === 0) break;
+
+              for (const cache of caches) {
+                const key = cache.key;
+                let matched = false;
+                switch (mode) {
+                  case 'all':       matched = true; break;
+                  case 'clang':     matched = key.startsWith('clang-'); break;
+                  case 'ccache':    matched = key.startsWith('ccache-'); break;
+                  case 'apt-cache': matched = key.includes('apt-cache') || key.includes('apt'); break;
+                  case 'thinlto-cache': matched = key.startsWith('thinlto-'); break;
+                  default:          matched = false;
+                }
+                if (matched) {
+                  totalFound++;
+                  console.log(`Delete cache: ${key}`);
+                  try {
+                    await github.rest.actions.deleteActionsCacheById({
+                      owner, repo, cache_id: cache.id
+                    });
+                    totalDeleted++;
+                  } catch (err) {
+                    console.log(`Failed to delete cache: ${key}`);
+                  }
+                }
+              }
+              if (caches.length < 100) break;
+              page++;
+            }
+
+            if (totalFound === 0) {
+              console.log("No matching cache found.");
+            } else {
+              console.log(`Found a total of ${totalFound} cache items; successfully deleted ${totalDeleted}.`);
+            }
+
+  cleanup-self-workflow:
+    runs-on: ubuntu-latest
+    if: always()
+    env:
+      CURRENT_RUN_ID: ${{ github.run_id }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Clean the workflow own Run History
+        run: |
+          set -e
+          echo "Cleaning up the history for this workflow (Workflow and Cache Cleanup)..."
+          DELETED=0
+
+          while IFS=' ' read -r RUN_ID STATE; do
+            [ -z "$RUN_ID" ] && continue
+            [[ "$RUN_ID" == "$CURRENT_RUN_ID" ]] && continue
+            [[ "$STATE" == "in_progress" || "$STATE" == "queued" || "$STATE" == "waiting" ]] && continue
+            echo "Delete own record ID: $RUN_ID"
+            gh run delete "$RUN_ID" --repo "$REPO" \
+              && DELETED=$((DELETED + 1)) \
+              || echo "❌ Deletion failed: $RUN_ID"
+          done < <(gh run list \
+            --repo "$REPO" \
+            --workflow "Workflow and Cache Cleanup" \
+            --limit 200 \
+            --json databaseId,status \
+            --jq '.[] | [(.databaseId | tostring), .status] | join(" ")')
+
+          echo "✅ Personal record cleanup complete; a total of $DELETED items were deleted."
