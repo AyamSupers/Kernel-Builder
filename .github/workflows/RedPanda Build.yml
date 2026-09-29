@@ -33,6 +33,11 @@ on:
         required: true
         type: boolean
         default: false
+      telegram_notify:
+        description: 'Send Telegram notification'
+        required: true
+        type: boolean
+        default: true
       github_release:
         description: 'Create GitHub Release'
         required: false
@@ -405,6 +410,7 @@ jobs:
           key: thinlto-cache-${{ runner.os }}-${{ env.KERNEL_FULL_VERSION }}
 
       - name: Send a notification to the Telegram community group.
+        if: github.event.inputs.telegram_notify == 'true'
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
