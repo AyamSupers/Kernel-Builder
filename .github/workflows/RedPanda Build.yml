@@ -356,7 +356,7 @@ jobs:
 
           make -j$(nproc --all) LLVM=1 LLVM_IAS=1 CC="ccache clang" HOSTCC="ccache gcc" \
             LD="$(pwd)/ld-wrapper" HOSTLD="$(pwd)/ld-wrapper" O=$GITHUB_WORKSPACE/kout \
-            KCFLAGS="$-pipe -Wno-error -Wno-implicit-function-declaration -Wno-implicit-int -Wno-default-const-init-var-unsafe -Wno-format -Wno-unknown-warning-option" \
+            KCFLAGS="-pipe -Wno-error -Wno-implicit-function-declaration -Wno-implicit-int -Wno-default-const-init-var-unsafe -Wno-format -Wno-unknown-warning-option" \
             Image || { echo "make Image failed"; exit 1; }
 
           echo "Kernel Compilation Complete!"
