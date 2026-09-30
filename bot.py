@@ -13,11 +13,12 @@ async def main():
     keyboard = [
         [
             InlineKeyboardButton("Download", url="https://example.com/download"),
-            InlineKeyboardButton("Changelogs", url="https://example.com/changelogs")
+            InlineKeyboardButton("Changelogs", url="https://telegra.ph/RedPanda-kernel---Changelogs-09-30")
         ],
         [
             InlineKeyboardButton("Donate", url="https://example.com/donate"),
-            InlineKeyboardButton("Channel", url="https://t.me/channel_anda")
+            InlineKeyboardButton("Multi Manager", url="https://telegra.ph/Multi-Manager-KernelSU-09-30"),
+            InlineKeyboardButton("Channel", url="https://t.me/ArtecxyzArchive")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
