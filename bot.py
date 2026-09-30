@@ -12,12 +12,12 @@ async def main():
 
     keyboard = [
         [
-            InlineKeyboardButton("📥 Download", url="https://example.com/download"),
-            InlineKeyboardButton("📝 Changelogs", url="https://example.com/changelogs")
+            InlineKeyboardButton("Download", url="https://example.com/download"),
+            InlineKeyboardButton("Changelogs", url="https://example.com/changelogs")
         ],
         [
-            InlineKeyboardButton("❤️ Donate", url="https://example.com/donate"),
-            InlineKeyboardButton("📢 Channel", url="https://t.me/channel_anda")
+            InlineKeyboardButton("Donate", url="https://example.com/donate"),
+            InlineKeyboardButton("Channel", url="https://t.me/channel_anda")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
