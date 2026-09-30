@@ -193,6 +193,7 @@ jobs:
             else
               echo "::warning::File Patch not found at $MM_PATCH — skipping"
             fi
+            sed -i 's/\(KSU_COMMIT_SHA := \$(KSU_COMMIT_SHA)\)-dirty/\1/' kernel/Kbuild
           elif [ "${{ github.event.inputs.kernelsu_variant }}" = "KernelSU-Next" ]; then
             echo "🛠️ Setting up KernelSU-Next (dev branch)..."
             curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s dev
