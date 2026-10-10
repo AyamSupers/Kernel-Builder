@@ -171,7 +171,7 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.kernelsu_variant }}" = "BakaSU" ]; then
             echo "🛠️ Setting up BakaSU (main branch)..."
-            curl -LSs "https://raw.githubusercontent.com/BakaSU/BakaSU/main/kernel/setup.sh" | bash -s main
+            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
             cd KernelSU
             KSU_VERSION=$(expr $(git rev-list --count HEAD) + 30700 2>/dev/null || echo 114514)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
