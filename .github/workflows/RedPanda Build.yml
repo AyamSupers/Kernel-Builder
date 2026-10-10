@@ -19,15 +19,6 @@ on:
         type: choice
         options:
           - Neutron
-      lto_type:
-        description: 'LTO Optimization (none = fast compile, thin = default, full = slow)'
-        required: true
-        type: choice
-        default: 'thin'
-        options:
-          - 'none'
-          - 'thin'
-          - 'full'
       lrng_enable:
         description: 'Enable LRNG v60 (better entropy for crypto/gaming)'
         required: true
@@ -282,14 +273,6 @@ jobs:
           
           set_config CONFIG_HEADERS_INSTALL n
           set_config CONFIG_LD_DEAD_CODE_DATA_ELIMINATION y
-
-          if [[ "${{ github.event.inputs.lto_type }}" == "full" ]]; then
-            sed -i '/^CONFIG_LTO_NONE=y/{ s/^/# /; s/=y$/ is not set/; }' "$DEFCONFIG"
-            set_config CONFIG_LTO_CLANG_FULL y
-          elif [[ "${{ github.event.inputs.lto_type }}" == "thin" ]]; then
-            sed -i '/^CONFIG_LTO_NONE=y/{ s/^/# /; s/=y$/ is not set/; }' "$DEFCONFIG"
-            set_config CONFIG_LTO_CLANG_THIN y
-          fi
           
           set_config CONFIG_KSU_SUSFS y
           set_config CONFIG_KSU_SUSFS_SUS_PATH y
