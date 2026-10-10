@@ -6,10 +6,10 @@ on:
       kernelsu_variant:
         description: "Select build variant"
         required: true
-        default: "ReSukiSU"
+        default: "BakaSU"
         type: choice
         options:
-          - ReSukiSU
+          - BakaSU
           - KernelSU-Next
           - SukiSU-Ultra
       clang_choice:
@@ -178,13 +178,13 @@ jobs:
       - name: ⚡ Setup KernelSU
         working-directory: kernel_workspace
         run: |
-          if [ "${{ github.event.inputs.kernelsu_variant }}" = "ReSukiSU" ]; then
-            echo "🛠️ Setting up ReSukiSU (main branch)..."
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
+          if [ "${{ github.event.inputs.kernelsu_variant }}" = "BakaSU" ]; then
+            echo "🛠️ Setting up BakaSU (main branch)..."
+            curl -LSs "https://raw.githubusercontent.com/BakaSU/BakaSU/main/kernel/setup.sh" | bash -s main
             cd KernelSU
             KSU_VERSION=$(expr $(git rev-list --count HEAD) + 30700 2>/dev/null || echo 114514)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "✅ ReSukiSU $(git rev-parse --short HEAD) (ver $KSU_VERSION)"
+            echo "✅ BakaSU $(git rev-parse --short HEAD) (ver $KSU_VERSION)"
 
             MM_PATCH="$GITHUB_WORKSPACE/patches/more_multi_manager.patch"
             if [ -f "$MM_PATCH" ]; then
