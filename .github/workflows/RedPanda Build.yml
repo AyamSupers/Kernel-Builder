@@ -1,4 +1,4 @@
-jiname: Build RedPanda GKI Kernel
+name: Build RedPanda GKI Kernel
 
 on:
   workflow_dispatch:
