@@ -6,10 +6,10 @@ on:
       kernelsu_variant:
         description: "Select build variant"
         required: true
-        default: "ReSukiSU"
+        default: "BakaSU"
         type: choice
         options:
-          - ReSukiSU
+          - BakaSU
           - KernelSU-Next
           - SukiSU-Ultra
       clang_choice:
@@ -19,20 +19,6 @@ on:
         type: choice
         options:
           - Neutron
-      lto_type:
-        description: 'LTO Optimization (none = fast compile, thin = default, full = slow)'
-        required: true
-        type: choice
-        default: 'thin'
-        options:
-          - 'none'
-          - 'thin'
-          - 'full'
-      lrng_enable:
-        description: 'Enable LRNG v60 (better entropy for crypto/gaming)'
-        required: true
-        type: boolean
-        default: false
       telegram_notify:
         description: 'Send Telegram notification'
         required: true
@@ -178,21 +164,21 @@ jobs:
       - name: ⚡ Setup KernelSU
         working-directory: kernel_workspace
         run: |
-          if [ "${{ github.event.inputs.kernelsu_variant }}" = "ReSukiSU" ]; then
-            echo "🛠️ Setting up ReSukiSU (main branch)..."
-            curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
+          if [ "${{ github.event.inputs.kernelsu_variant }}" = "BakaSU" ]; then
+            echo "🛠️ Setting up BakaSU (main branch)..."
+            curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
             cd KernelSU
             KSU_VERSION=$(expr $(git rev-list --count HEAD) + 30700 2>/dev/null || echo 114514)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "✅ ReSukiSU $(git rev-parse --short HEAD) (ver $KSU_VERSION)"
+            echo "✅ BakaSU $(git rev-parse --short HEAD) (ver $KSU_VERSION)"
 
-            MM_PATCH="$GITHUB_WORKSPACE/patches/more_multi_manager.patch"
-            if [ -f "$MM_PATCH" ]; then
-              patch -p1 -F 3 < "$MM_PATCH"
-              echo "✅ Add More Multi-Manager List"
-            else
-              echo "::warning::File Patch not found at $MM_PATCH — skipping"
-            fi
+            # MM_PATCH="$GITHUB_WORKSPACE/patches/more_multi_manager.patch"
+            # if [ -f "$MM_PATCH" ]; then
+            #   patch -p1 -F 3 < "$MM_PATCH"
+            #   echo "✅ Add More Multi-Manager List"
+            # else
+            #   echo "::warning::File Patch not found at $MM_PATCH — skipping"
+            # fi
             sed -i 's/-dirty//g' kernel/Kbuild
           elif [ "${{ github.event.inputs.kernelsu_variant }}" = "KernelSU-Next" ]; then
             echo "🛠️ Setting up KernelSU-Next (dev branch)..."
@@ -228,21 +214,6 @@ jobs:
           else
             echo "⚠️  SUS_MAP guard not found — patch may need adjustment"
           fi
-          
-      - name: Enable LRNG v60
-        if: inputs.lrng_enable
-        working-directory: kernel_workspace
-        run: |
-          patch -p1 --forward --no-backup-if-mismatch < $GITHUB_WORKSPACE/patches/lrng_v60_android15-6.6.patch
-          cat >> arch/arm64/configs/$KERNEL_DEFCONFIG << 'EOF'
-          CONFIG_RANDOM_DEFAULT_IMPL=n
-          CONFIG_LRNG=y
-          CONFIG_LRNG_COLLECTION_SIZE_1024=y
-          CONFIG_LRNG_HEALTH_TESTS=y
-          CONFIG_LRNG_IRQ=y
-          CONFIG_LRNG_CONTINUOUS_COMPRESSION_ENABLED=y
-          EOF
-          echo "✅ LRNG v60 enabled"
 
       - name: ⚙️ Configure Kernel Options
         working-directory: kernel_workspace
@@ -282,14 +253,6 @@ jobs:
           
           set_config CONFIG_HEADERS_INSTALL n
           set_config CONFIG_LD_DEAD_CODE_DATA_ELIMINATION y
-
-          if [[ "${{ github.event.inputs.lto_type }}" == "full" ]]; then
-            sed -i '/^CONFIG_LTO_NONE=y/{ s/^/# /; s/=y$/ is not set/; }' "$DEFCONFIG"
-            set_config CONFIG_LTO_CLANG_FULL y
-          elif [[ "${{ github.event.inputs.lto_type }}" == "thin" ]]; then
-            sed -i '/^CONFIG_LTO_NONE=y/{ s/^/# /; s/=y$/ is not set/; }' "$DEFCONFIG"
-            set_config CONFIG_LTO_CLANG_THIN y
-          fi
           
           set_config CONFIG_KSU_SUSFS y
           set_config CONFIG_KSU_SUSFS_SUS_PATH y
