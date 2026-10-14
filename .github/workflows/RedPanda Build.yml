@@ -19,11 +19,6 @@ on:
         type: choice
         options:
           - Neutron
-      lrng_enable:
-        description: 'Enable LRNG v60 (better entropy for crypto/gaming)'
-        required: true
-        type: boolean
-        default: false
       telegram_notify:
         description: 'Send Telegram notification'
         required: true
@@ -219,21 +214,6 @@ jobs:
           else
             echo "⚠️  SUS_MAP guard not found — patch may need adjustment"
           fi
-          
-      - name: Enable LRNG v60
-        if: inputs.lrng_enable
-        working-directory: kernel_workspace
-        run: |
-          patch -p1 --forward --no-backup-if-mismatch < $GITHUB_WORKSPACE/patches/lrng_v60_android15-6.6.patch
-          cat >> arch/arm64/configs/$KERNEL_DEFCONFIG << 'EOF'
-          CONFIG_RANDOM_DEFAULT_IMPL=n
-          CONFIG_LRNG=y
-          CONFIG_LRNG_COLLECTION_SIZE_1024=y
-          CONFIG_LRNG_HEALTH_TESTS=y
-          CONFIG_LRNG_IRQ=y
-          CONFIG_LRNG_CONTINUOUS_COMPRESSION_ENABLED=y
-          EOF
-          echo "✅ LRNG v60 enabled"
 
       - name: ⚙️ Configure Kernel Options
         working-directory: kernel_workspace
