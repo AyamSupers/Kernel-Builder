@@ -37,7 +37,7 @@ env:
   KERNEL_REPO: https://${{ secrets.KERNEL_REPO_TOKEN }}@github.com/Artecxyz/RedPanda-kernel.git
   KERNEL_DEFCONFIG: redpanda_defconfig
   KBUILD_BUILD_USER: Artecxyz
-  KBUILD_BUILD_HOST: dev
+  KBUILD_BUILD_HOST: users
 
 jobs:
   build:
