@@ -202,7 +202,7 @@ jobs:
       - name: 🔧 Setup Patches (SUSFS)
         working-directory: kernel_workspace
         run: |
-          git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.6
+          git clone --depth=1 https://github.com/Artecxyz/susfs4ksu.git -b gki-android15-6.6
           
           cp susfs4ksu/kernel_patches/fs/* ./fs/
           cp susfs4ksu/kernel_patches/include/linux/* ./include/linux/
