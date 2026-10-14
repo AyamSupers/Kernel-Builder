@@ -37,7 +37,7 @@ env:
   KERNEL_REPO: https://github.com/AyamSupers/kernel.git
   KERNEL_DEFCONFIG: redpanda_defconfig
   KBUILD_BUILD_USER: Artecxyz
-  KBUILD_BUILD_HOST: dev
+  KBUILD_BUILD_HOST: users
 
 jobs:
   build:
