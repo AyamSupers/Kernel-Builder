@@ -217,10 +217,6 @@ def banner_slideshow(banner_ids) -> str:
 
 
 def compose_markdown(env, variants_block, banner_ids=()) -> str:
-    linux_ver = env.get("LINUX_VER", "N/A")
-    kernel_ver = env.get("KERNEL_VERSION", "")
-    android_ver = caption.KERNEL_VERSION_TO_ANDROID.get(kernel_ver, "?")
-    major_minor = ".".join(linux_ver.split(".")[:2]) + ".x"
     group = env.get("TELEGRAM_GROUP", "").strip() or DEFAULT_GROUP
     group_url = "https://t.me/{}".format(group)
     artifact_url = "https://t.me/{}".format(group)
@@ -234,7 +230,6 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
         if banner_ids:
             parts.append(banner_slideshow(banner_ids))
         parts.append("# RedPanda GKI Kernel")
-        parts.append(f"> GKI Kernel | Android {android_ver} | Linux {major_minor}")
         parts.append(features_details(env))
         parts.append(build_info_table(env))
         parts.append(variants_block)
