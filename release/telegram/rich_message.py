@@ -71,6 +71,12 @@ def commits_url(env) -> str:
     return f"https://github.com/{owner}/{repo}/commits/{branch}"
 
 
+def changelogs_url(env) -> str:
+    custom = env.get("CHANGELOG_URL", "").strip()
+    if custom:
+        return custom
+    return commits_url(env)
+
 def html_cell(text: str) -> str:
     return caption.html_escape(str(text)).replace("\n", " ").strip()
 
@@ -238,10 +244,10 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
     cl = changelog_block(env)
     if cl:
         if not build_mode:
-            parts.append(button_row(("Changelogs", commits_url(env), "success")))
+            parts.append(button_row(("Changelogs", changelogs_url(env), "success")))
         parts.append(cl)
     elif not build_mode:
-        parts.append(button_row(("Changelogs", commits_url(env), "success")))
+        parts.append(button_row(("Changelogs", changelogs_url(env), "success")))
 
     if not build_mode:
         parts.append(button_row([

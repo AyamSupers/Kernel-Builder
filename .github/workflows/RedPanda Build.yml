@@ -28,6 +28,10 @@ on:
         required: false
         default: false
         type: boolean
+      changelogs_url:
+        description: 'Changelogs URL (link tombol Changelogs, kosong = commit kernel)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -438,6 +442,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
           TELEGRAM_API_BASE: http://localhost:8081
+          CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
         run: bash release/telegram/post.sh
 
       - name: 🛑 Stop Local Bot API
