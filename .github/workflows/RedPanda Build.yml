@@ -252,9 +252,6 @@ jobs:
               ;;
           esac
           
-          set_config CONFIG_HEADERS_INSTALL n
-          set_config CONFIG_LD_DEAD_CODE_DATA_ELIMINATION y
-          
           set_config CONFIG_KSU_SUSFS y
           set_config CONFIG_KSU_SUSFS_SUS_PATH y
           set_config CONFIG_KSU_SUSFS_SUS_MOUNT y
