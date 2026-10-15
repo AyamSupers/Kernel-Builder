@@ -77,6 +77,19 @@ def changelogs_url(env) -> str:
         return custom
     return commits_url(env)
 
+def download_url(env) -> str:
+    repo = env.get("GITHUB_REPOSITORY", "").strip()
+    if not repo:
+        return ""
+    server = env.get("GITHUB_SERVER_URL", "").strip() or "https://github.com"
+    return f"{server}/{repo}/releases"
+
+def changelogs_buttons(env) -> str:
+    return button_row([
+        ("Changelogs", changelogs_url(env), "success"),
+        ("Download", download_url(env), "primary"),
+    ])
+
 def html_cell(text: str) -> str:
     return caption.html_escape(str(text)).replace("\n", " ").strip()
 
@@ -244,10 +257,10 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
     cl = changelog_block(env)
     if cl:
         if not build_mode:
-            parts.append(button_row(("Changelogs", changelogs_url(env), "success")))
+            parts.append(changelogs_buttons(env))
         parts.append(cl)
     elif not build_mode:
-        parts.append(button_row(("Changelogs", changelogs_url(env), "success")))
+        parts.append(changelogs_buttons(env))
 
     if not build_mode:
         parts.append(button_row([
