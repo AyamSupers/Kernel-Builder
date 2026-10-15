@@ -84,11 +84,17 @@ def download_url(env) -> str:
     server = env.get("GITHUB_SERVER_URL", "").strip() or "https://github.com"
     return f"{server}/{repo}/releases"
 
+def download_buttons(env) -> str:
+    return button_row([("Download", download_url(env), "primary")])
+
+
 def changelogs_buttons(env) -> str:
-    return button_row([
-        ("Changelogs", changelogs_url(env), "success"),
-        ("Download", download_url(env), "primary"),
-    ])
+    # Download di atas, Changelogs di bawah (2 baris terpisah).
+    rows = [
+        download_buttons(env),
+        button_row([("Changelogs", changelogs_url(env), "success")]),
+    ]
+    return "\n".join(r for r in rows if r)
 
 def html_cell(text: str) -> str:
     return caption.html_escape(str(text)).replace("\n", " ").strip()
