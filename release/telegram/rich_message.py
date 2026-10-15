@@ -219,7 +219,8 @@ def banner_slideshow(banner_ids) -> str:
 def compose_markdown(env, variants_block, banner_ids=()) -> str:
     group = env.get("TELEGRAM_GROUP", "").strip() or DEFAULT_GROUP
     group_url = "https://t.me/{}".format(group)
-    artifact_url = "https://t.me/{}".format(group)
+    support_url = "https://sociabuzz.com/artecxyz"
+    channel_url = "https://t.me/ArtecxyzArchive"
 
     build_mode = is_build_mode(env)
 
@@ -244,8 +245,8 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
 
     if not build_mode:
         parts.append(button_row([
-            ("Support", group_url, "primary"),
-            ("Channel", artifact_url, "primary"),
+            ("Support", support_url, "primary"),
+            ("Channel", channel_url, "primary"),
         ]))
         parts.append("> " + BUG_REPORT_NOTE.format(group_url=group_url))
         parts.append("\\#GKI \\#Kernel \\#RedPanda")
