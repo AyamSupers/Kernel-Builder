@@ -414,9 +414,35 @@ jobs:
           name: post-stage
           path: /tmp/post-stage
 
+      - name: 🤖 Start Local Bot API
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          set -euo pipefail
+          docker run -d --name tg-bot-api -p 8081:8081 \
+            -e TELEGRAM_API_ID="${TELEGRAM_API_ID}" \
+            -e TELEGRAM_API_HASH="${TELEGRAM_API_HASH}" \
+            -e TELEGRAM_LOCAL=true \
+            aiogram/telegram-bot-api:latest
+          for _ in $(seq 1 30); do
+            if curl -sf "http://localhost:8081/bot${BOT_TOKEN}/getMe" > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs tg-bot-api
+          exit 1
+
       - name: 📨 Send Post
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
+          TELEGRAM_API_BASE: http://localhost:8081
         run: bash release/telegram/post.sh
+
+      - name: 🛑 Stop Local Bot API
+        if: always()
+        run: docker rm -f tg-bot-api 2>/dev/null || true
