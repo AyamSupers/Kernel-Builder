@@ -49,6 +49,7 @@ def shared_env(first: dict) -> dict:
             "COMPILER_STRING": first.get("compiler_string", ""),
             "LTO_MODE": first.get("lto_mode", ""),
             "VARIANT": first.get("variant", ""),
+            "VARIANT_VERSION": first.get("variant_version", ""),
             "SUSFS_VERSION": first.get("susfs_version", ""),
             "SUSFS_ENABLED": first.get("susfs_enabled", ""),
             "APPLIED_PATCHES": first.get("applied_patches", ""),

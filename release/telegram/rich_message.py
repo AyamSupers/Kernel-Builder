@@ -75,15 +75,30 @@ def html_cell(text: str) -> str:
     return caption.html_escape(str(text)).replace("\n", " ").strip()
 
 
+def variant_line(env) -> str:
+    key = env.get("VARIANT", "").strip()
+    has_susfs = key.endswith("_SUSFS")
+    base = key[:-len("_SUSFS")] if has_susfs else key
+    display = variant_display(base) if base else "N/A"
+    parts = display
+    ver = env.get("VARIANT_VERSION", "").strip()
+    if ver:
+        parts += f" {ver}"
+    susfs_ver = env.get("SUSFS_VERSION", "").strip()
+    if has_susfs or env.get("SUSFS_ENABLED", "") == "1" or susfs_ver:
+        parts += " + SuSFS" + (f" {susfs_ver}" if susfs_ver else "")
+    return parts
+
+
 def build_info_table(env) -> str:
+    variant = variant_line(env)
     lto_raw = env.get("LTO_MODE", "").strip()
     lto_display = caption.LTO_DISPLAY.get(lto_raw, lto_raw or "N/A")
     lto_chip = chip(lto_display, caption.LTO_CHIP_STYLE.get(lto_raw, ""))
     rows = [
         ("Kernel", html_cell("Linux " + (env.get("LINUX_VER", "").strip() or "N/A"))),
-        ("Source", html_cell(env.get("KERNEL_SOURCE_REPO", "").strip() or "N/A")),
-        ("Branch", html_cell(env.get("KERNEL_BRANCH", "").strip() or "N/A")),
         ("Toolchain", html_cell(env.get("COMPILER_STRING", "").strip() or "N/A")),
+        ("Variant", html_cell(variant)),
         ("LTO", lto_chip),
     ]
     body = "".join(f"<tr><td>{html_cell(k)}</td><td>{v}</td></tr>" for k, v in rows)
@@ -214,15 +229,14 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
 
     parts = []
     if build_mode:
-        parts += [build_info_table(env), addon_table(env), variants_block]
+        parts += [build_info_table(env), variants_block]
     else:
         if banner_ids:
             parts.append(banner_slideshow(banner_ids))
-        parts.append(f"# RedPanda GKI | {linux_ver}")
+        parts.append("# RedPanda GKI Kernel")
         parts.append(f"> GKI Kernel | Android {android_ver} | Linux {major_minor}")
         parts.append(features_details(env))
         parts.append(build_info_table(env))
-        parts.append(addon_table(env))
         parts.append(variants_block)
 
     cl = changelog_block(env)
