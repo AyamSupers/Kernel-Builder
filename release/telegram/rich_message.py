@@ -78,6 +78,10 @@ def changelogs_url(env) -> str:
     return commits_url(env)
 
 def download_url(env) -> str:
+    # Prioritas: input manual / hasil mirror PixelDrain > halaman Releases.
+    custom = env.get("DOWNLOAD_URL", "").strip()
+    if custom:
+        return custom
     repo = env.get("GITHUB_REPOSITORY", "").strip()
     if not repo:
         return ""

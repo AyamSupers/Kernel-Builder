@@ -33,6 +33,7 @@ send_post() {
     POST_BANNER="$with_banner" \
     TELEGRAM_GROUP="${TELEGRAM_GROUP:-}" \
     CHANGELOG="${CHANGELOG:-}" \
+    DOWNLOAD_URL="${DOWNLOAD_URL:-}" \
     GITHUB_SERVER_URL="${GITHUB_SERVER_URL:-https://github.com}" \
     GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}" \
     python3 "${TELEGRAM_DIR}/post_card.py" "$STAGE_DIR" "$PAYLOAD_FILE" "$ATTACHMENTS_FILE" \

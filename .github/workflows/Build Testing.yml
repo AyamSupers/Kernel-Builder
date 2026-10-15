@@ -32,6 +32,10 @@ on:
         description: 'Changelogs URL (link tombol Changelogs, kosong = commit kernel)'
         required: false
         default: ''
+      download_url:
+        description: 'Download URL manual (link tombol Download, kosong = auto PixelDrain / GitHub Releases)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -418,6 +422,13 @@ jobs:
           name: post-stage
           path: /tmp/post-stage
 
+      - name: 🪞 Mirror to PixelDrain
+        env:
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+          DOWNLOAD_URL: ${{ github.event.inputs.download_url }}
+          STAGE_DIR: /tmp/post-stage
+        run: bash release/telegram/mirror_pixeldrain.sh
+
       - name: 🤖 Start Local Bot API
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -446,6 +457,7 @@ jobs:
           MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
           TELEGRAM_API_BASE: http://localhost:8081
           CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
+          DOWNLOAD_URL: ${{ env.DOWNLOAD_URL }}
         run: bash release/telegram/post.sh
 
       - name: 🛑 Stop Local Bot API
