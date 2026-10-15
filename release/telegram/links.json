@@ -1,0 +1,10 @@
+{
+  "variants": {
+    "BAKASU": "https://github.com/Baka-SU/BakaSU/releases",
+    "KSUNEXT": "https://github.com/KernelSU-Next/KernelSU-Next/releases",
+    "KSU": "https://github.com/tiann/KernelSU/releases",
+    "SUKISU": "https://t.me/Sukiksu",
+    "VANILLA": ""
+  },
+  "mountless": {}
+}
