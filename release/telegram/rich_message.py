@@ -237,13 +237,14 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
     cl = changelog_block(env)
     if cl:
         if not build_mode:
-            parts.append(button_row(("Full Changelog", commits_url(env), "success")))
+            parts.append(button_row(("Changelogs", commits_url(env), "success")))
         parts.append(cl)
     elif not build_mode:
-        parts.append(button_row(("Commits", commits_url(env), "success")))
+        parts.append(button_row(("Changelogs", commits_url(env), "success")))
 
     if not build_mode:
         parts.append(button_row([
+            ("Support", group_url, "primary"),
             ("Channel", artifact_url, "primary"),
         ]))
         parts.append("> " + BUG_REPORT_NOTE.format(group_url=group_url))
