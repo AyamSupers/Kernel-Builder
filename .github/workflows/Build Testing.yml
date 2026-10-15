@@ -50,6 +50,8 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    outputs:
+      download_url: ${{ steps.pixeldrain.outputs.url }}
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
@@ -370,6 +372,17 @@ jobs:
           ZIP_NAME="$(basename "$ZIP_PATH")"
           ZIP_PATH="$ZIP_PATH" ZIP_NAME="$ZIP_NAME" bash release/telegram/stage.sh
 
+      - name: 🪞 Mirror to PixelDrain
+        id: pixeldrain
+        if: github.event.inputs.telegram_notify == 'true'
+        env:
+          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
+          DOWNLOAD_URL: ${{ github.event.inputs.download_url }}
+          STAGE_DIR: ${{ github.workspace }}/post-stage
+        run: |
+          URL="$(bash release/telegram/mirror_pixeldrain.sh | tail -n 1)"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
       - name: 📤 Upload post-stage
         if: github.event.inputs.telegram_notify == 'true'
         uses: actions/upload-artifact@v7
@@ -422,13 +435,6 @@ jobs:
           name: post-stage
           path: /tmp/post-stage
 
-      - name: 🪞 Mirror to PixelDrain
-        env:
-          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
-          DOWNLOAD_URL: ${{ github.event.inputs.download_url }}
-          STAGE_DIR: /tmp/post-stage
-        run: bash release/telegram/mirror_pixeldrain.sh
-
       - name: 🤖 Start Local Bot API
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -457,7 +463,7 @@ jobs:
           MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
           TELEGRAM_API_BASE: http://localhost:8081
           CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
-          DOWNLOAD_URL: ${{ env.DOWNLOAD_URL }}
+          DOWNLOAD_URL: ${{ needs.build.outputs.download_url }}
         run: bash release/telegram/post.sh
 
       - name: 🛑 Stop Local Bot API
