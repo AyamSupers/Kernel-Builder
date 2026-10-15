@@ -414,41 +414,14 @@ jobs:
           name: post-stage
           path: /tmp/post-stage
 
-      - name: 🤖 Start Local Bot API
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-        run: |
-          set -euo pipefail
-          docker run -d --name tg-bot-api -p 8081:8081 \
-            -e TELEGRAM_API_ID="${TELEGRAM_API_ID}" \
-            -e TELEGRAM_API_HASH="${TELEGRAM_API_HASH}" \
-            -e TELEGRAM_LOCAL=true \
-            aiogram/telegram-bot-api:latest
-          for _ in $(seq 1 30); do
-            if curl -sf "http://localhost:8081/bot${TELEGRAM_BOT_TOKEN}/getMe" > /dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker logs tg-bot-api
-          exit 1
-
       - name: 📨 Send Post
         env:
-          TELEGRAM_API_BASE: http://localhost:8081
-          TELEGRAM_BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.CHAT_ID }}
-          TELEGRAM_CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          TELEGRAM_THREAD_ID_BUILD: ${{ secrets.MESSAGE_THREAD_ID }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
           ROOT_DIR: ${{ github.workspace }}
           STAGE_DIR: /tmp/post-stage
           RUN_MODE: ${{ github.event.inputs.github_release == 'true' && 'Release' || 'Build' }}
           GITHUB_SERVER_URL: ${{ github.server_url }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: bash release/telegram/post.sh
-
-      - name: 🛑 Stop Local Bot API
-        if: always()
-        run: docker rm -f tg-bot-api 2>/dev/null || true

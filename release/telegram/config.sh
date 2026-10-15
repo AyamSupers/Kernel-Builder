@@ -19,7 +19,8 @@ TELEGRAM_MAX_RETRIES="${TELEGRAM_MAX_RETRIES:-3}"
 # Kompatibilitas nama secret lama (Kernel-Builder) -> nama baru (Luminaire)
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-${BOT_TOKEN:-}}"
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-${CHAT_ID:-}}"
-TELEGRAM_CHANNEL_ID="${TELEGRAM_CHANNEL_ID:-${CHANNEL_ID:-}}"
+# Tanpa CHANNEL_ID: mode Release ikut terkirim ke CHAT_ID (grup).
+TELEGRAM_CHANNEL_ID="${TELEGRAM_CHANNEL_ID:-${CHANNEL_ID:-${TELEGRAM_CHAT_ID:-}}}"
 
 # Grup diskusi (tanpa @). Dipakai untuk tombol "RedPanda Lab" di postingan.
 TELEGRAM_GROUP="${TELEGRAM_GROUP:-ArtecxyzArchive}"
