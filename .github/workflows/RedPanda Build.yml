@@ -418,10 +418,5 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
-          ROOT_DIR: ${{ github.workspace }}
-          STAGE_DIR: /tmp/post-stage
-          RUN_MODE: ${{ github.event.inputs.github_release == 'true' && 'Release' || 'Build' }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
         run: bash release/telegram/post.sh
