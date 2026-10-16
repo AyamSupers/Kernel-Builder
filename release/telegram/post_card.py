@@ -70,19 +70,20 @@ def variant_title(meta: dict) -> str:
     return " \u00b7 ".join(parts)
 
 
-def variant_block(meta: dict, index: int) -> str:
-    return "\n".join(
-        [
-            rm.variant_header(variant_title(meta), rm.release_url(meta.get("variant", ""))),
-            "",
-            f"![](tg://document?id=zip{index})",
-            "",
-        ]
-    )
+def variant_block(meta: dict, index: int, attach_zip: bool = True) -> str:
+    lines = [
+        rm.variant_header(variant_title(meta), rm.release_url(meta.get("variant", ""))),
+        "",
+    ]
+    if attach_zip:
+        lines += [f"![](tg://document?id=zip{index})", ""]
+    return "\n".join(lines)
 
 
-def attachment_specs(metas: list, banners: list) -> list:
+def attachment_specs(metas: list, banners: list, attach_zip: bool = True) -> list:
     specs = [f"banner_file{i}=@{path}" for i, path in enumerate(banners, 1)]
+    if not attach_zip:
+        return specs
     for i, meta in enumerate(metas, 1):
         specs.append(f"zip_{i}=@{meta['zip_path']};filename={meta['zip_name']}")
     return specs
@@ -101,16 +102,23 @@ def banner_requested() -> bool:
     return os.environ.get("POST_BANNER", "0").lower() in ("1", "true", "yes")
 
 
-def build_payload(metas: list, env: dict, banner_count: int) -> dict:
-    blocks = "\n".join(variant_block(m, i) for i, m in enumerate(metas, 1))
+def mirror_available() -> bool:
+    # Kalau link mirror (PixelDrain/manual) ada, file zip tidak perlu
+    # dilampirkan ke Telegram — cukup tombol Download.
+    return bool(os.environ.get("DOWNLOAD_URL", "").strip())
+
+
+def build_payload(metas: list, env: dict, banner_count: int, attach_zip: bool = True) -> dict:
+    blocks = "\n".join(variant_block(m, i, attach_zip) for i, m in enumerate(metas, 1))
     banner_ids = [f"banner{i}" for i in range(1, banner_count + 1)]
     markdown = rm.compose_markdown(env, blocks, banner_ids=banner_ids)
     media = [
         {"id": f"banner{i}", "media": {"type": "photo", "media": f"attach://banner_file{i}"}}
         for i in range(1, banner_count + 1)
     ]
-    for i in range(1, len(metas) + 1):
-        media.append({"id": f"zip{i}", "media": {"type": "document", "media": f"attach://zip_{i}"}})
+    if attach_zip:
+        for i in range(1, len(metas) + 1):
+            media.append({"id": f"zip{i}", "media": {"type": "document", "media": f"attach://zip_{i}"}})
     return {"markdown": markdown, "media": media}
 
 
@@ -124,17 +132,18 @@ def main() -> None:
         sys.exit("post_card: no staged variants found")
 
     banners = find_banners() if banner_requested() else []
-    payload = build_payload(metas, shared_env(metas[0]), len(banners))
+    attach_zip = not mirror_available()
+    payload = build_payload(metas, shared_env(metas[0]), len(banners), attach_zip)
     if len(payload["markdown"]) > RICH_LIMIT:
         sys.exit(f"post_card: {len(payload['markdown'])} chars exceeds {RICH_LIMIT}")
 
     with open(payload_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
     with open(attachments_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(attachment_specs(metas, banners)) + "\n")
+        f.write("\n".join(attachment_specs(metas, banners, attach_zip)) + "\n")
 
     print(
-        f"[info] post_card: {len(metas)} variant(s), banners={len(banners)}, {len(payload['markdown'])} chars (limit {RICH_LIMIT}) \u2705",
+        f"[info] post_card: {len(metas)} variant(s), banners={len(banners)}, attach_zip={int(attach_zip)}, {len(payload['markdown'])} chars (limit {RICH_LIMIT}) \u2705",
         file=sys.stderr,
         flush=True,
     )
