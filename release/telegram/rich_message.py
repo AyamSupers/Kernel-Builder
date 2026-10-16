@@ -103,6 +103,17 @@ def html_cell(text: str) -> str:
     return caption.html_escape(str(text)).replace("\n", " ").strip()
 
 
+def variant_version_display(env) -> str:
+    # "v4.2.0 (11900)" kalau tag + nomor ada, "v11900" kalau cuma nomor,
+    # tag saja kalau cuma tag, "" kalau dua-duanya kosong.
+    tag = env.get("KSU_TAG", "").strip()
+    ver = env.get("VARIANT_VERSION", "").strip()
+    num = ver[1:] if ver.startswith("v") else ver
+    if tag and num and tag not in (ver, num):
+        return f"{tag} ({num})"
+    return tag or ver
+
+
 def variant_line(env) -> str:
     key = env.get("VARIANT", "").strip()
     has_susfs = key.endswith("_SUSFS")
@@ -112,9 +123,9 @@ def variant_line(env) -> str:
     label = env.get("VARIANT_LABEL", "").strip()
     display = label or (variant_display(base) if base else "N/A")
     parts = display
-    ver = env.get("VARIANT_VERSION", "").strip()
-    if ver:
-        parts += f" {ver}"
+    vv = variant_version_display(env)
+    if vv:
+        parts += f" {vv}"
     susfs_ver = env.get("SUSFS_VERSION", "").strip()
     if has_susfs or env.get("SUSFS_ENABLED", "") == "1" or susfs_ver:
         parts += " + SuSFS" + (f" {susfs_ver}" if susfs_ver else "")

@@ -51,6 +51,7 @@ def shared_env(first: dict) -> dict:
             "VARIANT": first.get("variant", ""),
             "VARIANT_LABEL": first.get("variant_label", ""),
             "VARIANT_VERSION": first.get("variant_version", ""),
+            "KSU_TAG": first.get("ksu_tag", ""),
             "SUSFS_VERSION": first.get("susfs_version", ""),
             "SUSFS_ENABLED": first.get("susfs_enabled", ""),
             "APPLIED_PATCHES": first.get("applied_patches", ""),
@@ -62,9 +63,11 @@ def shared_env(first: dict) -> dict:
 
 def variant_title(meta: dict) -> str:
     key = meta.get("variant", "UNKNOWN")
-    version = meta.get("variant_version", "")
     has_susfs = key.endswith("_SUSFS")
     label = meta.get("variant_label", "").strip()
+    version = rm.variant_version_display(
+        {"KSU_TAG": meta.get("ksu_tag", ""), "VARIANT_VERSION": meta.get("variant_version", "")}
+    )
     if label:
         base_title = " ".join(p for p in (label, version) if p)
     else:

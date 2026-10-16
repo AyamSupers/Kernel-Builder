@@ -200,6 +200,11 @@ jobs:
             echo "❌ Unrecognized variant: ${{ github.event.inputs.kernelsu_variant }}"
             exit 1
           fi
+          # Tag rilis KSU (mis. v4.2.0 / v3.4.2) untuk baris Variant.
+          # Berjalan di dalam dir hasil setup (KernelSU / KernelSU-Next).
+          KSU_TAG="$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)"
+          echo "KSU_TAG=${KSU_TAG}" >> $GITHUB_ENV
+          echo "✅ KSU tag: ${KSU_TAG}"
     
       - name: 🔧 Setup Patches (SUSFS)
         working-directory: kernel_workspace
