@@ -104,9 +104,12 @@ def html_cell(text: str) -> str:
 
 
 def variant_version_display(env) -> str:
-    # "v4.2.0 (11900)" kalau tag + nomor ada, "v11900" kalau cuma nomor,
-    # tag saja kalau cuma tag, "" kalau dua-duanya kosong.
+    # Full name ala manager: "v4.2.0-a1b2c3d4 (31800)".
+    # "v11900" kalau cuma nomor, tag saja kalau cuma tag.
     tag = env.get("KSU_TAG", "").strip()
+    commit = env.get("KSU_COMMIT", "").strip()
+    if tag and commit and commit not in tag:
+        tag = f"{tag}-{commit}"
     ver = env.get("VARIANT_VERSION", "").strip()
     num = ver[1:] if ver.startswith("v") else ver
     if tag and num and tag not in (ver, num):
