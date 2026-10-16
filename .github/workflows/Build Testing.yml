@@ -442,6 +442,11 @@ jobs:
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
         run: |
           set -euo pipefail
+          if [ -z "${TELEGRAM_API_ID:-}" ] || [ -z "${TELEGRAM_API_HASH:-}" ]; then
+            echo "::warning::TELEGRAM_API_ID / TELEGRAM_API_HASH tidak di-set — skip Local Bot API, pakai api.telegram.org (batas upload 50MB). Ambil di https://my.telegram.org > API development tools."
+            echo "TELEGRAM_API_BASE=https://api.telegram.org" >> "$GITHUB_ENV"
+            exit 0
+          fi
           docker run -d --name tg-bot-api -p 8081:8081 \
             -e TELEGRAM_API_ID="${TELEGRAM_API_ID}" \
             -e TELEGRAM_API_HASH="${TELEGRAM_API_HASH}" \
@@ -449,6 +454,7 @@ jobs:
             aiogram/telegram-bot-api:latest
           for _ in $(seq 1 30); do
             if curl -sf "http://localhost:8081/bot${BOT_TOKEN}/getMe" > /dev/null; then
+              echo "TELEGRAM_API_BASE=http://localhost:8081" >> "$GITHUB_ENV"
               exit 0
             fi
             sleep 1
@@ -461,7 +467,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
-          TELEGRAM_API_BASE: http://localhost:8081
+          TELEGRAM_API_BASE: ${{ env.TELEGRAM_API_BASE || 'http://localhost:8081' }}
           CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
           DOWNLOAD_URL: ${{ needs.build.outputs.download_url }}
         run: bash release/telegram/post.sh
