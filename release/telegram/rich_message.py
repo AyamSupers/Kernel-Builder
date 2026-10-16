@@ -258,7 +258,7 @@ def changelog_block(env) -> str:
 
 
 def banner_slideshow(banner_ids) -> str:
-    slides = "\n".join(f'<img src="tg://photo?id={banner_id}" tg-spoiler/>' for banner_id in banner_ids)
+    slides = "\n".join(f'<img src="tg://photo?id={banner_id}"/>' for banner_id in banner_ids)
     return f"<tg-slideshow>\n{slides}\n</tg-slideshow>"
 
 
