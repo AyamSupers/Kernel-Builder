@@ -367,7 +367,9 @@ jobs:
         run: |
           ZIP_PATH="$(ls kernel_workspace/RedPanda-GKI-*.zip | head -n 1)"
           ZIP_NAME="$(basename "$ZIP_PATH")"
-          ZIP_PATH="$ZIP_PATH" ZIP_NAME="$ZIP_NAME" bash release/telegram/stage.sh
+          SUSFS_VERSION_TAG="$(grep -E '^#define SUSFS_VERSION[[:space:]]' kernel_workspace/include/linux/susfs.h 2>/dev/null | awk '{print $3}' | tr -d '"' || true)"
+          echo "SUSFS version: ${SUSFS_VERSION_TAG:-unknown}"
+          ZIP_PATH="$ZIP_PATH" ZIP_NAME="$ZIP_NAME" SUSFS_VERSION_TAG="$SUSFS_VERSION_TAG" bash release/telegram/stage.sh
 
       - name: 🪞 Mirror to PixelDrain
         id: pixeldrain
