@@ -196,13 +196,6 @@ jobs:
             KSU_VERSION=$(expr $(git rev-list --count HEAD) + 10200)
             echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
             echo "✅ KernelSU-Next $(git describe --tags 2>/dev/null || git rev-parse --short HEAD) (ver $KSU_VERSION)"
-          elif [ "${{ github.event.inputs.kernelsu_variant }}" = "SukiSU-Ultra" ]; then
-            echo "🛠️ Setting up SukiSU-Ultra (builtin branch)..."
-            curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/builtin/kernel/setup.sh" | bash -s builtin
-            cd KernelSU
-            KSU_VERSION=$(expr $(git rev-list --count HEAD) + 37185)
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "✅ SukiSU-Ultra $(git rev-parse --short HEAD) (ver $KSU_VERSION)"
           else
             echo "❌ Unrecognized variant: ${{ github.event.inputs.kernelsu_variant }}"
             exit 1
@@ -254,9 +247,6 @@ jobs:
           set_config CONFIG_KALLSYMS y
           set_config CONFIG_KALLSYMS_ALL y
           case "${{ github.event.inputs.kernelsu_variant }}" in
-            "SukiSU-Ultra")
-              set_config CONFIG_KSU_MANUAL_HOOK y
-              ;;
             "KernelSU-Next")
               set_config CONFIG_EXT4_FS y
               ;;
@@ -273,15 +263,6 @@ jobs:
           set_config CONFIG_KSU_SUSFS_OPEN_REDIRECT y
           set_config CONFIG_KSU_SUSFS_SUS_MAP y
           case "${{ github.event.inputs.kernelsu_variant }}" in
-            "SukiSU-Ultra")
-              set_config CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT y
-              set_config CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT y
-              set_config CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT y
-              set_config CONFIG_KSU_SUSFS_TRY_UMOUNT y
-              set_config CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT y
-              set_config CONFIG_KSU_SUSFS_SUS_OVERLAYFS n
-              set_config CONFIG_KSU_SUSFS_SUS_SU n
-              ;;
             "KernelSU-Next")
               set_config CONFIG_KSU_SUSFS_TRY_UMOUNT y
               ;;

@@ -38,8 +38,7 @@ VARIANT_RAW="${KSU_VARIANT:-${KERNEL_VARIANT:-UNKNOWN}}"
 VARIANT_KEY="$(echo "$VARIANT_RAW" | tr '[:lower:]' '[:upper:]' | tr -d ' _-')"
 case "$VARIANT_KEY" in
     KERNELSUNEXT) VARIANT_KEY="KSUNEXT" ;;
-    SUKISUULTRA) VARIANT_KEY="SUKISU" ;;
-    BAKASU|KSUNEXT|KSU|SUKISU|VANILLA) ;;
+    BAKASU|KSUNEXT|KSU|VANILLA) ;;
     *) VARIANT_KEY="$(echo "$VARIANT_RAW" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')" ;;
 esac
 
