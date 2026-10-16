@@ -25,7 +25,7 @@ cleanup() {
 }
 
 send_post() {
-    local chat_id="$1" thread_id="$2" with_banner="$3" label="$4"
+    local chat_id="$1" thread_id="$2" with_banner="$3" label="$4" pin="$5"
     local -a attachment_specs send_args
     local message_id
 
@@ -53,6 +53,13 @@ send_post() {
 
     message_id="$(jq -r '.result.message_id // empty' <<< "$TG_RESPONSE")"
     log "Sent ✅ ${label} (message_id=${message_id})"
+
+    if [ "${pin}" = "1" ] && [ -n "${message_id}" ]; then
+        log "📌 Pinning ${label} (message_id=${message_id})..."
+        telegram_api_call "pinChatMessage" "$RESPONSE_FILE" "Pin ${label}" \
+            -F "chat_id=${chat_id}" -F "message_id=${message_id}" -F "disable_notification=true" \
+            || warn "Pin ${label} failed — pastikan bot admin dengan izin pin"
+    fi
 }
 
 if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
@@ -84,10 +91,10 @@ trap cleanup EXIT
 
 if [ "$RUN_MODE_UPPER" = "RELEASE" ]; then
     [ -n "${TELEGRAM_CHANNEL_ID:-}" ] || error "TELEGRAM_CHANNEL_ID (atau CHANNEL_ID) not set — isi secret CHANNEL_ID untuk mode Release"
-    send_post "$TELEGRAM_CHANNEL_ID" "" 1 "Channel post"
+    send_post "$TELEGRAM_CHANNEL_ID" "" 1 "Channel post" 1
     exit 0
 fi
 
 # BUILD -> grup + thread (thread opsional, kosong = General)
 [ -n "${TELEGRAM_CHAT_ID:-}" ] || error "TELEGRAM_CHAT_ID (atau CHAT_ID) not set"
-send_post "$TELEGRAM_CHAT_ID" "${TELEGRAM_THREAD_ID_BUILD:-}" 1 "Group post"
+send_post "$TELEGRAM_CHAT_ID" "${TELEGRAM_THREAD_ID_BUILD:-}" 1 "Group post" 0
