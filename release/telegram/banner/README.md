@@ -6,9 +6,7 @@ Taruh 1 atau lebih file banner di sini:
 
 Catatan:
 
-- Banner **hanya dipakai untuk postingan Release** (mode Channel),
-  dipilih acak 1 file (lihat `post_card.py` → `find_banners()`).
-- Mode Build (grup) sengaja **tanpa banner** agar ringan.
+- Banner dipakai untuk **semua** postingan (Build grup + Release channel).
 - File dari Luminaire (`banner.png` … `banner6.png`) **jangan** dipakai
   langsung — itu branding Luminaire. Ganti dengan banner RedPanda kamu.
 - Kalau belum punya banner, kosongkan saja folder ini TAPI jangan

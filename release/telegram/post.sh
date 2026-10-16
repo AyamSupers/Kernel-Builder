@@ -90,4 +90,4 @@ fi
 
 # BUILD -> grup + thread (thread opsional, kosong = General)
 [ -n "${TELEGRAM_CHAT_ID:-}" ] || error "TELEGRAM_CHAT_ID (atau CHAT_ID) not set"
-send_post "$TELEGRAM_CHAT_ID" "${TELEGRAM_THREAD_ID_BUILD:-}" 0 "Group post"
+send_post "$TELEGRAM_CHAT_ID" "${TELEGRAM_THREAD_ID_BUILD:-}" 1 "Group post"

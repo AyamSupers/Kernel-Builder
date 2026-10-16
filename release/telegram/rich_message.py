@@ -254,11 +254,11 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
     build_mode = is_build_mode(env)
 
     parts = []
+    if banner_ids:
+        parts.append(banner_slideshow(banner_ids))
     if build_mode:
         parts += [build_info_table(env), variants_block]
     else:
-        if banner_ids:
-            parts.append(banner_slideshow(banner_ids))
         parts.append("# RedPanda GKI Kernel")
         parts.append(features_details(env))
         parts.append(build_info_table(env))
