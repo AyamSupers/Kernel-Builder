@@ -23,34 +23,11 @@ on:
         required: true
         type: boolean
         default: true
-      telegram_target:
-        description: 'Telegram target (Auto = Channel kalau Release, Grup kalau Build)'
-        required: false
-        default: 'Auto'
-        type: choice
-        options:
-          - Auto
-          - Group
-          - Channel
-      attach_file:
-        description: 'Lampirkan file zip ke Telegram (false = hanya link Download)'
-        required: false
-        default: true
-        type: boolean
       github_release:
         description: 'Create GitHub Release'
         required: false
         default: false
         type: boolean
-      changelogs_url:
-        description: 'Changelogs URL (link tombol Changelogs, kosong = commit kernel)'
-        required: false
-        default: ''
-      download_url:
-        description: 'Download URL manual (link tombol Download, kosong = auto PixelDrain / GitHub Releases)'
-        required: false
-        default: ''
-
 permissions:
   contents: write
 
@@ -64,8 +41,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    outputs:
-      download_url: ${{ steps.pixeldrain.outputs.url }}
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
@@ -372,44 +347,6 @@ jobs:
           ZIP_NAME=RedPanda-GKI-${{ github.event.inputs.kernelsu_variant }}-$(date +%Y%m%d-%H%M).zip
           zip -r9 "../$ZIP_NAME" ./*
 
-      - name: 📨 Stage for Telegram post
-        if: github.event.inputs.telegram_notify == 'true'
-        env:
-          KSU_VARIANT: ${{ github.event.inputs.kernelsu_variant }}
-          KSUVER: ${{ env.KSUVER }}
-          KERNEL_FULL_VERSION: ${{ env.KERNEL_FULL_VERSION }}
-          KERNEL_BRANCH: ${{ env.KERNEL_BRANCH }}
-          KERNEL_SOURCE_OWNER: Artecxyz
-          KERNEL_SOURCE_REPO: RedPanda-kernel
-          CLANG_CHOICE: ${{ github.event.inputs.clang_choice }}
-          STAGE_DIR: ${{ github.workspace }}/post-stage
-        run: |
-          ZIP_PATH="$(ls kernel_workspace/RedPanda-GKI-*.zip | head -n 1)"
-          ZIP_NAME="$(basename "$ZIP_PATH")"
-          SUSFS_VERSION_TAG="$(grep -E '^#define SUSFS_VERSION[[:space:]]' kernel_workspace/include/linux/susfs.h 2>/dev/null | awk '{print $3}' | tr -d '"' || true)"
-          echo "SUSFS version: ${SUSFS_VERSION_TAG:-unknown}"
-          ZIP_PATH="$ZIP_PATH" ZIP_NAME="$ZIP_NAME" SUSFS_VERSION_TAG="$SUSFS_VERSION_TAG" bash release/telegram/stage.sh
-
-      - name: 🪞 Mirror to PixelDrain
-        id: pixeldrain
-        if: github.event.inputs.telegram_notify == 'true'
-        env:
-          PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
-          DOWNLOAD_URL: ${{ github.event.inputs.download_url }}
-          STAGE_DIR: ${{ github.workspace }}/post-stage
-        run: |
-          URL="$(bash release/telegram/mirror_pixeldrain.sh | tail -n 1)"
-          echo "url=${URL}" >> "$GITHUB_OUTPUT"
-
-      - name: 📤 Upload post-stage
-        if: github.event.inputs.telegram_notify == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: post-stage
-          path: post-stage/*.zip
-          if-no-files-found: ignore
-          retention-days: 1
-
       - name: 📤 Upload zip artifact
         if: github.event.inputs.kernelsu_variant != 'none' && github.event.inputs.github_release != 'true'
         uses: actions/upload-artifact@v7
@@ -426,6 +363,43 @@ jobs:
           name: RedPanda GKI ${{ github.event.inputs.kernelsu_variant }} v${{ env.KSUVER }} - ${{ env.KERNEL_FULL_VERSION }}
           files: kernel_workspace/*.zip
 
+      - name: 📨 Send Telegram (simple)
+        if: github.event.inputs.telegram_notify == 'true'
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
+        run: |
+          BUILD_END=$(date +%s)
+          BUILD_DUR=$((BUILD_END - BUILD_START))
+          BUILD_MIN=$((BUILD_DUR / 60))
+          BUILD_SEC=$((BUILD_DUR % 60))
+
+          cat > /tmp/tg_caption.html <<EOF
+          <b>Kernel Build Successful!</b>
+
+          <b>👤 Author:</b> @Artecxyz
+          <b>📆 Build Time:</b> $(date "+%H:%M:%S - %d/%m/%Y")
+          <b>🕒 Build Speed:</b> ${BUILD_MIN} minutes ${BUILD_SEC} second
+          <b>📦 Variant:</b> ${{ github.event.inputs.kernelsu_variant }} (ver ${{ env.KSUVER }})
+          <b>🌐 Kernel version:</b> ${{ env.KERNEL_FULL_VERSION }}
+          <b>🔧 Toolchain:</b> ${{ github.event.inputs.clang_choice }} Clang
+          EOF
+
+          ZIP_PATH=$(ls kernel_workspace/RedPanda-GKI-*.zip 2>/dev/null | head -n 1)
+          if [ -z "$ZIP_PATH" ]; then
+            echo "⚠️ ZIP not found, skipping upload."
+            exit 0
+          fi
+          echo "📦 File: $ZIP_PATH ($(du -h "$ZIP_PATH" | cut -f1))"
+
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F chat_id="${CHAT_ID}" \
+            -F message_thread_id="${MESSAGE_THREAD_ID}" \
+            -F document=@"${ZIP_PATH}" \
+            -F caption="</tmp/tg_caption.html" \
+            -F parse_mode="HTML"
+
       - name: 📦 Save Cache
         uses: actions/cache/save@v6
         with:
@@ -438,42 +412,3 @@ jobs:
           path: ${{ env.LDCACHE_DIR }}
           key: thinlto-cache-${{ runner.os }}-${{ env.KERNEL_FULL_VERSION }}
 
-  notify:
-    name: Telegram Notify
-    runs-on: ubuntu-24.04
-    needs: build
-    if: github.event.inputs.telegram_notify == 'true' && always()
-    steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v7
-
-      - name: 📥 Download Post Stage
-        uses: actions/download-artifact@v8
-        with:
-          name: post-stage
-          path: /tmp/post-stage
-
-      - name: 📨 Send Post
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
-          TELEGRAM_API_BASE: https://api.telegram.org
-          TELEGRAM_TARGET: ${{ github.event.inputs.telegram_target }}
-          ATTACH_FILE: ${{ github.event.inputs.attach_file }}
-          CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
-          DOWNLOAD_URL: ${{ needs.build.outputs.download_url }}
-        run: bash release/telegram/post.sh
-
-      - name: 👤 Send via akun pribadi (channel 2)
-        env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION: ${{ secrets.TG_SESSION }}
-          TG_CHANNEL_2: ${{ secrets.CHANNEL_2 }}
-          DOWNLOAD_URL: ${{ needs.build.outputs.download_url }}
-          CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
-          STAGE_DIR: /tmp/post-stage
-        run: |
-          pip install -q telethon
-          python3 release/telegram/post_user.py
