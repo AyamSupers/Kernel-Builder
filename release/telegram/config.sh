@@ -7,8 +7,7 @@
 # Cara pakai:
 #   - Set secrets di GitHub: BOT_TOKEN (atau TELEGRAM_BOT_TOKEN),
 #     CHAT_ID (atau TELEGRAM_CHAT_ID), MESSAGE_THREAD_ID (opsional),
-#     CHANNEL_ID (atau TELEGRAM_CHANNEL_ID, untuk Release),
-#     TELEGRAM_API_ID / TELEGRAM_API_HASH (untuk Local Bot API).
+#     CHANNEL_ID (atau TELEGRAM_CHANNEL_ID, untuk Release).
 #   - Edit nilai default di bawah sesuai grup/channel kamu.
 
 TELEGRAM_API_BASE="${TELEGRAM_API_BASE:-https://api.telegram.org}"

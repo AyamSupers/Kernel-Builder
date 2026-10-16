@@ -3,9 +3,8 @@
 # ======================================================
 # 📨 TELEGRAM — Post Sender, Build / Release (RedPanda port)
 # Adapted from LuminaireProtocol/release/telegram/post.sh
-# Memakai Bot API 10.1+ sendRichMessage.
-# Untuk file >50MB WAJIB lewat Local Bot API Server
-# (lihat workflow notify job).
+# Memakai Bot API 10.1+ sendRichMessage via api.telegram.org
+# (batas upload 50MB per file).
 # ======================================================
 
 set -eo pipefail
