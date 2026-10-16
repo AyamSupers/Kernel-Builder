@@ -207,7 +207,8 @@ def patch_fold(env) -> list:
 
 def addon_table(env, link_engine: bool = False) -> str:
     # RedPanda tidak pakai sistem addon Luminaire — tampilkan ringkas saja.
-    variant = variant_display(env.get("VARIANT", "").strip()) if env.get("VARIANT", "").strip() else "N/A"
+    key = env.get("VARIANT", "").strip()
+    variant = env.get("VARIANT_LABEL", "").strip() or (variant_display(key) if key else "N/A")
     susfs = env.get("SUSFS_VERSION", "").strip() or (
         "Enable" if env.get("SUSFS_ENABLED", "") == "1" else "N/A"
     )
