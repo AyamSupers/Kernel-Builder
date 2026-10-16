@@ -89,12 +89,28 @@ esac
 
 trap cleanup EXIT
 
-if [ "$RUN_MODE_UPPER" = "RELEASE" ]; then
-    [ -n "${TELEGRAM_CHANNEL_ID:-}" ] || error "TELEGRAM_CHANNEL_ID (atau CHANNEL_ID) not set — isi secret CHANNEL_ID untuk mode Release"
+# Tujuan kirim: Auto (ikut RUN_MODE: Release->channel, Build->grup),
+# atau paksa Group / Channel via input telegram_target.
+TARGET_UPPER="${TELEGRAM_TARGET:-Auto}"
+TARGET_UPPER="${TARGET_UPPER^^}"
+case "$TARGET_UPPER" in
+    AUTO|"")
+        if [ "$RUN_MODE_UPPER" = "RELEASE" ]; then
+            TARGET_UPPER="CHANNEL"
+        else
+            TARGET_UPPER="GROUP"
+        fi
+        ;;
+    GROUP|CHANNEL) ;;
+    *) error "Telegram: unknown TELEGRAM_TARGET '${TELEGRAM_TARGET:-}' — expected Auto, Group, or Channel" ;;
+esac
+
+if [ "$TARGET_UPPER" = "CHANNEL" ]; then
+    [ -n "${TELEGRAM_CHANNEL_ID:-}" ] || error "TELEGRAM_CHANNEL_ID (atau CHANNEL_ID) not set — isi secret CHANNEL_ID untuk target Channel"
     send_post "$TELEGRAM_CHANNEL_ID" "" 1 "Channel post" 1
     exit 0
 fi
 
-# BUILD -> grup + thread (thread opsional, kosong = General)
+# GROUP -> grup + thread (thread opsional, kosong = General)
 [ -n "${TELEGRAM_CHAT_ID:-}" ] || error "TELEGRAM_CHAT_ID (atau CHAT_ID) not set"
 send_post "$TELEGRAM_CHAT_ID" "${TELEGRAM_THREAD_ID_BUILD:-}" 1 "Group post" 0

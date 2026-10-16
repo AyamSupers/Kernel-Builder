@@ -23,6 +23,15 @@ on:
         required: true
         type: boolean
         default: true
+      telegram_target:
+        description: 'Telegram target (Auto = Channel kalau Release, Grup kalau Build)'
+        required: false
+        default: 'Auto'
+        type: choice
+        options:
+          - Auto
+          - Group
+          - Channel
       github_release:
         description: 'Create GitHub Release'
         required: false
@@ -441,6 +450,7 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
           TELEGRAM_API_BASE: https://api.telegram.org
+          TELEGRAM_TARGET: ${{ github.event.inputs.telegram_target }}
           CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
           DOWNLOAD_URL: ${{ needs.build.outputs.download_url }}
         run: bash release/telegram/post.sh
