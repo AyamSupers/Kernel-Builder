@@ -41,6 +41,9 @@ BUG_REPORT_NOTE = (
 # Nama grup default kalau TELEGRAM_GROUP tidak di-set (tanpa @).
 DEFAULT_GROUP = "ArtecxyzArchive"
 
+SUPPORT_URL = "https://sociabuzz.com/artecxyz"
+CHANNEL_URL = "https://t.me/ArtecxyzArchive"
+
 
 def variant_display(key: str) -> str:
     return VARIANT_DISPLAY.get(key, key)
@@ -239,8 +242,8 @@ def banner_slideshow(banner_ids) -> str:
 def compose_markdown(env, variants_block, banner_ids=()) -> str:
     group = env.get("TELEGRAM_GROUP", "").strip() or DEFAULT_GROUP
     group_url = "https://t.me/{}".format(group)
-    support_url = "https://sociabuzz.com/artecxyz"
-    channel_url = "https://t.me/ArtecxyzArchive"
+    support_url = SUPPORT_URL
+    channel_url = CHANNEL_URL
 
     build_mode = is_build_mode(env)
 
