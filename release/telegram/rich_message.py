@@ -147,7 +147,9 @@ def build_info_table(env) -> str:
         ("LTO", lto_chip),
     ]
     body = "".join(f"<tr><td>{html_cell(k)}</td><td>{v}</td></tr>" for k, v in rows)
-    return f"<table bordered>{body}</table>"
+    # NOTE: Telegram tidak mendukung width kolom — satu-satunya pengatur
+    # yang didukung adalah atribut compact (padding lebih rapat).
+    return f"<table bordered compact>{body}</table>"
 
 
 def button_row(buttons) -> str:
@@ -182,40 +184,25 @@ def variant_header(title: str, url: str = "") -> str:
     )
 
 
-def core_features_folds() -> list:
-    out = ['<tg-button-row><tg-button type="disabled">Core Features'
-           "</tg-button></tg-button-row>", ""]
-    for category, items in caption.FRAGMENT_FEATURES.items():
-        out.append("<details>")
-        out.append(f"<summary>{category}</summary>")
-        out.append("")
-        for item in items:
-            if isinstance(item, tuple):
-                label, subs = item
-                out.append(f"- {label}: {', '.join(subs)}")
-            else:
-                out.append(f"- {item}")
-        out.append("</details>")
-    return out
+CREDITS = [
+    "GKI-AOSP for source kernel",
+    "firelzrd for kcompressd, le9uo, adios, and bore sched",
+    "luyancib for baseband-guard",
+]
 
 
-def patch_fold(env) -> list:
-    applied = [t for t in env.get("APPLIED_PATCHES", "").split(",") if t]
-    rows = [
-        caption.patch_active_line(env, t)
-        for t in caption.patch_order(env)
-        if t in applied
-    ]
-    if not rows:
-        rows = ["SUSFS + KSU integration"]
-    body = "".join(f"<tr><td>{html_cell(r)}</td></tr>" for r in rows)
-    return [
-        "<details>",
-        "<summary>RedPanda Patches</summary>",
-        "",
-        f"<table bordered>{body}</table>",
-        "</details>",
-    ]
+def credit_details() -> str:
+    body = "\n".join(f"\u2022 {c}" for c in CREDITS)
+    return "\n".join(
+        [
+            "<details>",
+            '<summary><tg-button type="disabled" style="primary">'
+            "Credit</tg-button></summary>",
+            "",
+            body,
+            "</details>",
+        ]
+    )
 
 
 def addon_table(env, link_engine: bool = False) -> str:
@@ -231,19 +218,6 @@ def addon_table(env, link_engine: bool = False) -> str:
     ]
     body = "".join(f"<tr><td>{html_cell(k)}</td><td>{v}</td></tr>" for k, v in rows)
     return f"<table bordered>{body}</table>"
-
-
-def features_details(env) -> str:
-    out = [
-        "<details>",
-        '<summary><tg-button type="disabled" style="primary">'
-        "What's Inside?</tg-button></summary>",
-        "",
-    ]
-    out += core_features_folds()
-    out += patch_fold(env)
-    out.append("</details>")
-    return "\n".join(out)
 
 
 def changelog_block(env) -> str:
@@ -277,7 +251,7 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
         parts += [build_info_table(env), variants_block]
     else:
         parts.append("# RedPanda GKI Kernel")
-        parts.append(features_details(env))
+        parts.append(credit_details())
         parts.append(build_info_table(env))
         parts.append(variants_block)
 
