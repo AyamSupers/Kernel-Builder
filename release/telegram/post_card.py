@@ -118,6 +118,14 @@ def mirror_available() -> bool:
     return bool(os.environ.get("DOWNLOAD_URL", "").strip())
 
 
+def attach_requested() -> bool:
+    # Opsi workflow attach_file (default true). false = jangan
+    # lampirkan file dalam kondisi apa pun.
+    return os.environ.get("ATTACH_FILE", "true").strip().lower() not in (
+        "0", "false", "no", "off", "",
+    )
+
+
 def build_payload(metas: list, env: dict, banner_count: int, attach_zip: bool = True) -> dict:
     blocks = "\n".join(variant_block(m, i, attach_zip) for i, m in enumerate(metas, 1))
     banner_ids = [f"banner{i}" for i in range(1, banner_count + 1)]
@@ -142,7 +150,7 @@ def main() -> None:
         sys.exit("post_card: no staged variants found")
 
     banners = find_banners() if banner_requested() else []
-    attach_zip = not mirror_available()
+    attach_zip = attach_requested() and not mirror_available()
     payload = build_payload(metas, shared_env(metas[0]), len(banners), attach_zip)
     if len(payload["markdown"]) > RICH_LIMIT:
         sys.exit(f"post_card: {len(payload['markdown'])} chars exceeds {RICH_LIMIT}")
