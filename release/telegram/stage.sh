@@ -55,6 +55,7 @@ jq -n \
     --arg variant "$VARIANT_KEY" \
     --arg variant_label "$VARIANT_RAW" \
     --arg variant_version "${KSUVER:+v$KSUVER}" \
+    --arg variant_version_display "${VARIANT_VERSION_DISPLAY:-}" \
     --arg ksu_tag "${KSU_TAG:-}" \
     --arg susfs_version "${SUSFS_VERSION_TAG:-}" \
     --arg susfs_enabled "${SUSFS_ENABLED:-1}" \

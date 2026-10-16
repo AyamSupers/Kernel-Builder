@@ -104,8 +104,11 @@ def html_cell(text: str) -> str:
 
 
 def variant_version_display(env) -> str:
-    # "v4.2.0 (11900)" kalau tag + nomor ada, "v11900" kalau cuma nomor,
-    # tag saja kalau cuma tag, "" kalau dua-duanya kosong.
+    # String jadi ala Luminaire sudah dihitung di workflow
+    # (mis. "v3.4.2 (33333/5)"); fallback dirakit dari tag + nomor.
+    display = env.get("VARIANT_VERSION_DISPLAY", "").strip()
+    if display:
+        return display
     tag = env.get("KSU_TAG", "").strip()
     ver = env.get("VARIANT_VERSION", "").strip()
     num = ver[1:] if ver.startswith("v") else ver

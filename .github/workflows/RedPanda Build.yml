@@ -177,9 +177,15 @@ jobs:
             echo "🛠️ Setting up BakaSU (main branch)..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
             cd KernelSU
-            KSU_VERSION=$(expr $(git rev-list --count HEAD) + 30700 2>/dev/null || echo 114514)
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "✅ BakaSU $(git rev-parse --short HEAD) (ver $KSU_VERSION)"
+            KSU_LOCAL_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+            KSU_VERSION_CODE=$((30000 + KSU_LOCAL_VERSION + 700))
+            KSU_TAG_NAME=$(git describe --abbrev=0 --tags 2>/dev/null || echo "v4.1.0")
+            KSU_UAPI_VERSION=$(grep -oP 'KERNEL_SU_UAPI_VERSION\s*[=,]\s*\K[0-9]+' uapi/supercall.h 2>/dev/null | head -n 1 || true)
+            if [ -n "$KSU_UAPI_VERSION" ]; then VARIANT_VERSION_DISPLAY="${KSU_TAG_NAME} (${KSU_VERSION_CODE}/${KSU_UAPI_VERSION})"; else VARIANT_VERSION_DISPLAY="${KSU_TAG_NAME} (${KSU_VERSION_CODE})"; fi
+            echo "KSUVER=$KSU_VERSION_CODE" >> $GITHUB_ENV
+            echo "KSU_TAG=${KSU_TAG_NAME}" >> $GITHUB_ENV
+            echo "VARIANT_VERSION_DISPLAY=${VARIANT_VERSION_DISPLAY}" >> $GITHUB_ENV
+            echo "✅ BakaSU ${VARIANT_VERSION_DISPLAY}"
 
             #MM_PATCH="$GITHUB_WORKSPACE/patches/more_multi_manager.patch"
             #if [ -f "$MM_PATCH" ]; then
@@ -193,9 +199,15 @@ jobs:
             echo "🛠️ Setting up KernelSU-Next (dev branch)..."
             curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/dev/kernel/setup.sh" | bash -s dev
             cd KernelSU-Next
-            KSU_VERSION=$(expr $(git rev-list --count HEAD) + 10200)
-            echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
-            echo "✅ KernelSU-Next $(git describe --tags 2>/dev/null || git rev-parse --short HEAD) (ver $KSU_VERSION)"
+            KSU_LOCAL_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+            KSU_VERSION_CODE=$((30000 + KSU_LOCAL_VERSION))
+            KSU_TAG_NAME=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.1")
+            KSU_UAPI_VERSION=$(grep -oP 'KERNEL_SU_UAPI_VERSION\s*[=,]\s*\K[0-9]+' uapi/supercall.h 2>/dev/null | head -n 1 || true)
+            if [ -n "$KSU_UAPI_VERSION" ]; then VARIANT_VERSION_DISPLAY="${KSU_TAG_NAME} (${KSU_VERSION_CODE}/${KSU_UAPI_VERSION})"; else VARIANT_VERSION_DISPLAY="${KSU_TAG_NAME} (${KSU_VERSION_CODE})"; fi
+            echo "KSUVER=$KSU_VERSION_CODE" >> $GITHUB_ENV
+            echo "KSU_TAG=${KSU_TAG_NAME}" >> $GITHUB_ENV
+            echo "VARIANT_VERSION_DISPLAY=${VARIANT_VERSION_DISPLAY}" >> $GITHUB_ENV
+            echo "✅ KernelSU-Next ${VARIANT_VERSION_DISPLAY}"
           else
             echo "❌ Unrecognized variant: ${{ github.event.inputs.kernelsu_variant }}"
             exit 1
