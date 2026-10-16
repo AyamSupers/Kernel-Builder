@@ -191,6 +191,13 @@ jobs:
             echo "🛠️ Setting up BakaSU (main branch)..."
             curl -LSs "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s main
             cd KernelSU
+            KSNEXT_COMPAT_PATCH="$GITHUB_WORKSPACE/patches/bakasu_ksunext_compat.patch"
+            if [ -f "$KSNEXT_COMPAT_PATCH" ]; then
+              patch -p1 < "$KSNEXT_COMPAT_PATCH"
+              echo "✅ KSU-Next manager compat applied"
+            else
+              echo "::warning::KSU-Next compat patch not found at $KSNEXT_COMPAT_PATCH — skipping"
+            fi
             KSU_LOCAL_VERSION=$(git rev-list --count HEAD 2>/dev/null || echo 0)
             KSU_VERSION_CODE=$((30000 + KSU_LOCAL_VERSION + 700))
             KSU_TAG_NAME=$(git describe --abbrev=0 --tags 2>/dev/null || echo "v4.1.0")
