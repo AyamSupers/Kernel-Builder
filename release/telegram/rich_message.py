@@ -255,6 +255,8 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
     else:
         parts.append("# RedPanda GKI Kernel")
         parts.append(build_info_table(env))
+        parts.append(variants_block)
+        parts.append(credit_details())
 
     cl = changelog_block(env)
     if cl:
@@ -269,8 +271,6 @@ def compose_markdown(env, variants_block, banner_ids=()) -> str:
             ("Support", support_url, "primary"),
             ("Channel", channel_url, "primary"),
         ]))
-        parts.append(credit_details())
-        parts.append(variants_block)
         parts.append("> " + BUG_REPORT_NOTE.format(group_url=group_url))
         parts.append("\\#GKI \\#Kernel \\#RedPanda")
 
