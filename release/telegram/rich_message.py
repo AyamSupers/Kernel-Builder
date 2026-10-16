@@ -108,7 +108,10 @@ def variant_line(env) -> str:
     key = env.get("VARIANT", "").strip()
     has_susfs = key.endswith("_SUSFS")
     base = key[:-len("_SUSFS")] if has_susfs else key
-    display = variant_display(base) if base else "N/A"
+    # Tampilkan label input workflow apa adanya (mis. "KernelSU-Next"),
+    # bukan key normalisasi (mis. "KSUNEXT").
+    label = env.get("VARIANT_LABEL", "").strip()
+    display = label or (variant_display(base) if base else "N/A")
     parts = display
     ver = env.get("VARIANT_VERSION", "").strip()
     if ver:

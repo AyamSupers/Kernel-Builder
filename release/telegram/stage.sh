@@ -31,11 +31,14 @@ fi
 command -v jq >/dev/null 2>&1 || { echo "[ERROR] post staging: jq not found" >&2; return 1 2>/dev/null || exit 1; }
 command -v zip >/dev/null 2>&1 || { echo "[ERROR] post staging: zip not found" >&2; return 1 2>/dev/null || exit 1; }
 
-# Normalisasi variant key: "BakaSU" -> "BAKASU", "KernelSU-Next" -> "KSUNEXT"
+# Normalisasi variant key: "BakaSU" -> "BAKASU", "KernelSU-Next" -> "KSUNEXT".
+# NOTE: '-' harus di ujung set tr, kalau di tengah (' -_') dibaca
+# sebagai range 0x20-0x5F dan menghapus huruf/angka!
 VARIANT_RAW="${KSU_VARIANT:-${KERNEL_VARIANT:-UNKNOWN}}"
-VARIANT_KEY="$(echo "$VARIANT_RAW" | tr '[:lower:]' '[:upper:]' | tr -d ' -_')"
+VARIANT_KEY="$(echo "$VARIANT_RAW" | tr '[:lower:]' '[:upper:]' | tr -d ' _-')"
 case "$VARIANT_KEY" in
     KERNELSUNEXT) VARIANT_KEY="KSUNEXT" ;;
+    SUKISUULTRA) VARIANT_KEY="SUKISU" ;;
     BAKASU|KSUNEXT|KSU|SUKISU|VANILLA) ;;
     *) VARIANT_KEY="$(echo "$VARIANT_RAW" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')" ;;
 esac
@@ -51,6 +54,7 @@ META_FILE="$(mktemp -d)/redpanda.json"
 
 jq -n \
     --arg variant "$VARIANT_KEY" \
+    --arg variant_label "$VARIANT_RAW" \
     --arg variant_version "${KSUVER:+v$KSUVER}" \
     --arg susfs_version "${SUSFS_VERSION_TAG:-}" \
     --arg susfs_enabled "${SUSFS_ENABLED:-1}" \

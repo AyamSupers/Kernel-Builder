@@ -49,6 +49,7 @@ def shared_env(first: dict) -> dict:
             "COMPILER_STRING": first.get("compiler_string", ""),
             "LTO_MODE": first.get("lto_mode", ""),
             "VARIANT": first.get("variant", ""),
+            "VARIANT_LABEL": first.get("variant_label", ""),
             "VARIANT_VERSION": first.get("variant_version", ""),
             "SUSFS_VERSION": first.get("susfs_version", ""),
             "SUSFS_ENABLED": first.get("susfs_enabled", ""),
@@ -63,8 +64,13 @@ def variant_title(meta: dict) -> str:
     key = meta.get("variant", "UNKNOWN")
     version = meta.get("variant_version", "")
     has_susfs = key.endswith("_SUSFS")
-    base = key[: -len("_SUSFS")] if has_susfs else key
-    parts = [" ".join(p for p in (rm.variant_display(base), version) if p)]
+    label = meta.get("variant_label", "").strip()
+    if label:
+        base_title = " ".join(p for p in (label, version) if p)
+    else:
+        base = key[: -len("_SUSFS")] if has_susfs else key
+        base_title = " ".join(p for p in (rm.variant_display(base), version) if p)
+    parts = [base_title]
     if has_susfs:
         parts.append(" ".join(p for p in ("SuSFS", meta.get("susfs_version", "")) if p))
     return " \u00b7 ".join(parts)
