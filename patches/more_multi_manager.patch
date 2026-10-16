@@ -1,5 +1,18 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index b7655cb3..742a28fb 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -98,7 +98,7 @@ ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+ ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
+ 
+ ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
+-$(info -- Supported Managers: KernelSU Official, KOWSU, BakaSU )
++$(info -- Supported Managers: KernelSU Official, KOWSU, BakaSU, KernelSU-Next )
+ endif
+ 
+ KERNEL_VERSION := $(VERSION).$(PATCHLEVEL)
 diff --git a/kernel/manager/apk_sign.c b/kernel/manager/apk_sign.c
-index eba496d5..65e2058b 100644
+index eba496d5..22676f5e 100644
 --- a/kernel/manager/apk_sign.c
 +++ b/kernel/manager/apk_sign.c
 @@ -36,6 +36,8 @@ static apk_sign_key_t apk_sign_keys[] = {
@@ -7,12 +20,12 @@ index eba496d5..65e2058b 100644
      { EXPECTED_SIZE_OFFICIAL, EXPECTED_HASH_OFFICIAL }, // tiann/KernelSU
      { EXPECTED_SIZE_KOWX712, EXPECTED_HASH_KOWX712 }, // KOWX712/KernelSU
 +    { EXPECTED_SIZE_KSUNEXT, EXPECTED_HASH_KSUNEXT }, // rifsxd/KernelSU-Next
-+    { EXPECTED_SIZE_MAMBOSU, EXPECTED_HASH_MAMBOSU }, // rapli/MamboSU
++    { EXPECTED_SIZE_MAMBOSU, EXPECTED_HASH_MAMBOSU }, // RapliVx/MamboSU
  #ifdef EXPECTED_SIZE
      { EXPECTED_SIZE, EXPECTED_HASH }, // Custom
  #endif
 diff --git a/kernel/manager/manager_sign.h b/kernel/manager/manager_sign.h
-index a940135d..cb208549 100644
+index a940135d..5f289cb0 100644
 --- a/kernel/manager/manager_sign.h
 +++ b/kernel/manager/manager_sign.h
 @@ -13,6 +13,14 @@
@@ -23,7 +36,7 @@ index a940135d..cb208549 100644
 +#define EXPECTED_SIZE_KSUNEXT 0x3e6
 +#define EXPECTED_HASH_KSUNEXT "79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7"
 +
-+// rapli/MamboSU
++// RapliVx/MamboSU
 +#define EXPECTED_SIZE_MAMBOSU 0x384
 +#define EXPECTED_HASH_MAMBOSU "a9462b8b98ea1ca7901b0cbdcebfaa35f0aa95e51b01d66e6b6d2c81b97746d8"
 +
