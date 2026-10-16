@@ -56,7 +56,6 @@ jq -n \
     --arg variant_label "$VARIANT_RAW" \
     --arg variant_version "${KSUVER:+v$KSUVER}" \
     --arg ksu_tag "${KSU_TAG:-}" \
-    --arg ksu_commit "${KSU_COMMIT:-}" \
     --arg susfs_version "${SUSFS_VERSION_TAG:-}" \
     --arg susfs_enabled "${SUSFS_ENABLED:-1}" \
     --arg linux_ver "$LINUX_VER" \
