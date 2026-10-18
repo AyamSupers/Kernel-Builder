@@ -29,8 +29,9 @@ name: Telegram Rich Notify
 #   • RedPanda Build  -> CHANNEL (secret CHANNEL_ID), layout Release
 #   • Build Testing   -> GROUP   (secret CHAT_ID + MESSAGE_THREAD_ID)
 #
-#   Channel  : zip TIDAK dilampirkan, tombol Download dari halaman artifact
-#              / Releases.
+#   Channel  : LINK ONLY — file tidak pernah dilampirkan (attach_file
+#              dipaksa false), tombol Download diambil dari halaman
+#              artifact / Releases / download_url manual.
 #   Group    : zip dilampirkan ke Telegram (layout Build tidak punya baris
 #              tombol Download).
 #
@@ -70,7 +71,7 @@ on:
           - Group
           - Channel
       attach_file:
-        description: 'Lampirkan file zip (Auto = Group: ya, Channel: tidak)'
+        description: 'Lampirkan file zip (Auto = Group: ya, Channel: tidak / link only)'
         required: false
         default: 'Auto'
         type: choice
@@ -194,6 +195,13 @@ jobs:
           fi
           if [ -z "$ATTACH" ]; then
             ATTACH="$DEFAULT_ATTACH"
+          fi
+
+          # Channel = LINK ONLY. File tidak pernah dilampirkan ke channel,
+          # walau input/variable mencoba memaksa attach_file=true.
+          if [ "$TARGET" = "Channel" ] && [ "$ATTACH" = "true" ]; then
+            echo "::warning::attach_file=true diabaikan untuk target Channel (link only)."
+            ATTACH="false"
           fi
 
           {
