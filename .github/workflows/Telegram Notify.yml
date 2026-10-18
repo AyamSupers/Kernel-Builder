@@ -26,18 +26,20 @@ name: Telegram Rich Notify
 #     secret Telethon tersedia).
 #
 # Routing tujuan kirim (mengikuti workflow asal):
-#   • RedPanda Build  -> CHANNEL (secret CHANNEL_ID), layout Release
-#   • Build Testing   -> GROUP   (secret CHAT_ID + MESSAGE_THREAD_ID)
+#   • RedPanda Build  -> CHANNEL, lewat AKUN PRIBADI (Telethon/MTProto),
+#                        bukan bot. Dikirim ke beberapa channel sekaligus:
+#                        secret CHANNEL_1 + CHANNEL_2 (dipisah koma).
+#                        LINK ONLY — file tidak pernah dilampirkan.
+#   • Build Testing   -> GROUP, lewat BOT (secret CHAT_ID +
+#                        MESSAGE_THREAD_ID). Zip dilampirkan (layout Build
+#                        tidak punya baris tombol Download).
 #
-#   Channel  : LINK ONLY — file tidak pernah dilampirkan (attach_file
-#              dipaksa false), tombol Download diambil dari halaman
-#              artifact / Releases / download_url manual.
-#   Group    : zip dilampirkan ke Telegram (layout Build tidak punya baris
-#              tombol Download).
+# Ringkas: Channel = akun pribadi + link only, Group = bot + lampiran file.
 #
 # Opsi saat Run workflow (manual):
 #   run_id           : kosong = otomatis run terakhir RedPanda Build / Build Testing
 #   target           : Auto (ikut workflow asal) | Group | Channel
+#   channels         : daftar channel akun pribadi (pisah koma), override secret
 #   attach_file      : Auto (Group: true, Channel: false) | true | false
 #   notify_on_failure: false = jangan kirim notif saat build gagal
 #   download_url     : link tombol Download manual
@@ -47,6 +49,7 @@ name: Telegram Rich Notify
 # repository variable TELEGRAM_DOWNLOAD_URL / TELEGRAM_CHANGELOGS_URL,
 # lalu fallback otomatis (halaman artifact run / Releases / commit kernel).
 # attach_file juga bisa dipaksa lewat repository variable TELEGRAM_ATTACH_FILE.
+# Daftar channel bisa juga dari repository variable TELEGRAM_CHANNELS.
 # ======================================================
 
 on:
@@ -70,6 +73,10 @@ on:
           - Auto
           - Group
           - Channel
+      channels:
+        description: 'Daftar channel akun pribadi, dipisah koma (kosong = secret CHANNEL_1,CHANNEL_2)'
+        required: false
+        default: ''
       attach_file:
         description: 'Lampirkan file zip (Auto = Group: ya, Channel: tidak / link only)'
         required: false
@@ -228,7 +235,6 @@ jobs:
           echo "   tujuan: ${TARGET} (mode ${RUN_MODE}, attach_file=${ATTACH})"
 
       - name: 📥 Checkout repository
-        if: steps.run.outputs.proceed == 'true'
         uses: actions/checkout@v7
         with:
           ref: ${{ steps.run.outputs.head_sha || github.event.repository.default_branch }}
@@ -353,8 +359,8 @@ jobs:
           fi
           echo "✅ Staging siap: $(find "$STAGE_DIR" -name '*.zip' -printf '%f\n' | tr '\n' ' ')"
 
-      - name: 📨 Kirim Rich Post ke Telegram
-        if: steps.run.outputs.proceed == 'true'
+      - name: 🤖 Kirim Rich Post ke Group (bot) — Build Testing
+        if: steps.run.outputs.proceed == 'true' && steps.run.outputs.target == 'Group'
         env:
           ROOT_DIR: ${{ github.workspace }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -376,14 +382,15 @@ jobs:
           CHANGELOG_URL: ${{ github.event.inputs.changelogs_url || vars.TELEGRAM_CHANGELOGS_URL || '' }}
         run: bash release/telegram/post.sh
 
-      - name: 👤 Kirim via akun pribadi (channel 2)
-        if: steps.run.outputs.proceed == 'true'
+      - name: 👤 Kirim ke channel via akun pribadi (RedPanda Build)
+        if: steps.run.outputs.proceed == 'true' && steps.run.outputs.target == 'Channel'
         continue-on-error: true
         env:
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
-          TG_CHANNEL_2: ${{ secrets.CHANNEL_2 }}
+          # Beberapa channel sekaligus: input manual > repo variable > secret.
+          TG_CHANNELS: ${{ github.event.inputs.channels || vars.TELEGRAM_CHANNELS || format('{0},{1}', secrets.CHANNEL_1, secrets.CHANNEL_2) }}
           DOWNLOAD_URL: ${{ github.event.inputs.download_url || vars.TELEGRAM_DOWNLOAD_URL || steps.stage.outputs.download_url }}
           CHANGELOG_URL: ${{ github.event.inputs.changelogs_url || vars.TELEGRAM_CHANGELOGS_URL || '' }}
           STAGE_DIR: ${{ github.workspace }}/post-stage
@@ -397,56 +404,75 @@ jobs:
           steps.run.outputs.suppress_failure_notify != 'true' &&
           steps.run.outputs.run_id != ''
         env:
+          TARGET: ${{ steps.run.outputs.target }}
+          WORKFLOW_NAME: ${{ steps.run.outputs.workflow_name }}
+          RUN_URL: ${{ steps.run.outputs.run_url }}
+          RUN_NUMBER: ${{ steps.run.outputs.run_number }}
+          RUN_ATTEMPT: ${{ steps.run.outputs.run_attempt }}
+          BRANCH: ${{ steps.run.outputs.head_branch }}
+          CONCLUSION: ${{ steps.run.outputs.conclusion }}
+          DURATION: ${{ steps.run.outputs.duration }}
+          ACTOR: ${{ steps.run.outputs.actor }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
-          TARGET: ${{ steps.run.outputs.target }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_CHANNELS: ${{ github.event.inputs.channels || vars.TELEGRAM_CHANNELS || format('{0},{1}', secrets.CHANNEL_1, secrets.CHANNEL_2) }}
         run: |
           set -euo pipefail
-          if [ -z "${BOT_TOKEN:-}" ]; then
-            echo "[WARN] BOT_TOKEN belum di-set — skip notif gagal."
+
+          MSG_PLAIN="$(printf '%s\n' \
+            "❌ Build gagal — ${WORKFLOW_NAME}" \
+            "" \
+            "Run     : #${RUN_NUMBER} (attempt ${RUN_ATTEMPT})" \
+            "Detail  : ${RUN_URL}" \
+            "Branch  : ${BRANCH}" \
+            "Status  : ${CONCLUSION}" \
+            "Durasi  : ${DURATION}" \
+            "Aktor   : ${ACTOR}")"
+
+          # Channel (RedPanda Build) -> akun pribadi, channel bisa lebih dari satu.
+          if [ "${TARGET:-Group}" = "Channel" ]; then
+            if [ -z "${TG_API_ID:-}" ] || [ -z "${TG_API_HASH:-}" ] || [ -z "${TG_SESSION:-}" ] || [ -z "${TG_CHANNELS:-}" ]; then
+              echo "[WARN] kredensial akun pribadi / daftar channel belum lengkap — skip notif gagal."
+              exit 0
+            fi
+            pip install -q telethon
+            MSG="$MSG_PLAIN" python3 release/telegram/post_user.py text
             exit 0
           fi
 
-          # Sama seperti post sukses: RedPanda Build -> Channel, lainnya -> Group.
-          CHAT="${CHAT_ID:-}"
-          THREAD="${MESSAGE_THREAD_ID:-}"
-          if [ "${TARGET:-Group}" = "Channel" ]; then
-            if [ -n "${CHANNEL_ID:-}" ]; then
-              CHAT="${CHANNEL_ID}"
-              THREAD=""
-            fi
-          fi
-
-          if [ -z "$CHAT" ]; then
-            echo "[WARN] chat tujuan belum di-set — skip notif gagal."
+          # Group (Build Testing) -> bot.
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
+            echo "[WARN] BOT_TOKEN / CHAT_ID belum di-set — skip notif gagal."
             exit 0
           fi
 
           TEXT="$(cat <<EOF
-          <b>❌ Build gagal — ${{ steps.run.outputs.workflow_name }}</b>
+          <b>❌ Build gagal — ${WORKFLOW_NAME}</b>
 
-          <b>🏷️ Run:</b> <a href="${{ steps.run.outputs.run_url }}">#${{ steps.run.outputs.run_number }}</a> (attempt ${{ steps.run.outputs.run_attempt }})
-          <b>🌿 Branch:</b> ${{ steps.run.outputs.head_branch }}
-          <b>📉 Status:</b> ${{ steps.run.outputs.conclusion }}
-          <b>🕒 Durasi:</b> ${{ steps.run.outputs.duration }}
-          <b>👤 Aktor:</b> ${{ steps.run.outputs.actor }}
+          <b>🏷️ Run:</b> <a href="${RUN_URL}">#${RUN_NUMBER}</a> (attempt ${RUN_ATTEMPT})
+          <b>🌿 Branch:</b> ${BRANCH}
+          <b>📉 Status:</b> ${CONCLUSION}
+          <b>🕒 Durasi:</b> ${DURATION}
+          <b>👤 Aktor:</b> ${ACTOR}
           EOF
           )"
 
-          if [ -n "${THREAD:-}" ]; then
+          if [ -n "${MESSAGE_THREAD_ID:-}" ]; then
             curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-              -F "chat_id=${CHAT}" \
-              -F "message_thread_id=${THREAD}" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "message_thread_id=${MESSAGE_THREAD_ID}" \
               -F "parse_mode=HTML" \
               -F 'link_preview_options={"is_disabled":true}' \
               -F "text=${TEXT}" > /dev/null
           else
             curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-              -F "chat_id=${CHAT}" \
+              -F "chat_id=${CHAT_ID}" \
               -F "parse_mode=HTML" \
               -F 'link_preview_options={"is_disabled":true}' \
               -F "text=${TEXT}" > /dev/null
           fi
-          echo "✅ Notif gagal terkirim ke ${TARGET}."
+          echo "✅ Notif gagal terkirim (bot → Group)."

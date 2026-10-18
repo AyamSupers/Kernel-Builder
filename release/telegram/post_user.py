@@ -1,11 +1,19 @@
 # ======================================================
-# 👤 TELEGRAM — Sender Akun Pribadi / Channel 2 (RedPanda)
+# 👤 TELEGRAM — Sender Akun Pribadi / Channel (RedPanda)
 # Via user session (Telethon/MTProto) — tampil atas nama akun sendiri.
 # BUKAN Bot API: akun user tidak bisa kirim tombol inline/tabel,
 # jadi format disederhanakan: foto + teks polos + file.
 #
-# Butuh secret: TG_API_ID, TG_API_HASH, TG_SESSION, CHANNEL_2.
-# Tanpa secret -> skip aman (exit 0).
+# Dipakai workflow "Telegram Rich Notify" untuk target Channel
+# (RedPanda Build) dan bisa kirim ke BEBERAPA channel sekaligus.
+#
+# Cara pakai:
+#   python3 post_user.py          -> kirim post hasil staging (butuh STAGE_DIR)
+#   python3 post_user.py text     -> kirim teks polos dari env MSG
+#
+# Butuh secret: TG_API_ID, TG_API_HASH, TG_SESSION, lalu daftar channel di
+# TG_CHANNELS (dipisah koma). Nama lama TG_CHANNEL_2 / CHANNEL_2 masih
+# didukung sebagai fallback. Tanpa secret -> skip aman (exit 0).
 # Buat session string: python3 release/telegram/make_session.py (di lokal)
 # ======================================================
 
@@ -22,6 +30,20 @@ import post_card as pc
 import rich_message as rm
 
 BANNER_PATTERNS = ("*.png", "*.jpg", "*.jpeg")
+
+
+def env_value(*names: str) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_targets() -> list:
+    """Daftar channel tujuan: TG_CHANNELS (pisah koma) > TG_CHANNEL_2/CHANNEL_2."""
+    raw = env_value("TG_CHANNELS", "TG_CHANNEL_2", "CHANNEL_2")
+    return [t.strip() for t in raw.split(",") if t.strip()]
 
 
 def compose_text(env: dict, download: str, changelogs: str) -> str:
@@ -54,38 +76,56 @@ def short_caption(env: dict, download: str) -> str:
 
 
 async def main() -> None:
-    api_id = os.environ.get("TG_API_ID", "").strip()
-    api_hash = os.environ.get("TG_API_HASH", "").strip()
-    session = os.environ.get("TG_SESSION", "").strip()
-    target = os.environ.get("TG_CHANNEL_2", "").strip() or os.environ.get("CHANNEL_2", "").strip()
-    if not (api_id and api_hash and session and target):
-        print("[WARN] user-post: TG_API_ID/TG_API_HASH/TG_SESSION/CHANNEL_2 belum lengkap — skip", flush=True)
+    mode = (sys.argv[1] if len(sys.argv) > 1 else "stage").strip().lower()
+    api_id = env_value("TG_API_ID")
+    api_hash = env_value("TG_API_HASH")
+    session = env_value("TG_SESSION")
+    targets = resolve_targets()
+    if not (api_id and api_hash and session and targets):
+        print("[WARN] user-post: TG_API_ID/TG_API_HASH/TG_SESSION/TG_CHANNELS belum lengkap — skip", flush=True)
         return
+
+    text_mode = mode == "text"
+    if text_mode:
+        message = env_value("MSG")
+        if not message:
+            print("[WARN] user-post: MSG kosong — skip", flush=True)
+            return
+    else:
+        stage_dir = os.environ.get("STAGE_DIR", "/tmp/post-stage")
+        metas = pc.load_metas(stage_dir)
+        if not metas:
+            print("[WARN] user-post: no staged variants — skip", flush=True)
+            return
+        env = pc.shared_env(metas[0])
+        download = rm.download_url(env)
+        changelogs = rm.changelogs_url(env)
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "banner")
+        banners = sorted({p for pat in BANNER_PATTERNS for p in glob.glob(os.path.join(base, pat))})
 
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    stage_dir = os.environ.get("STAGE_DIR", "/tmp/post-stage")
-    metas = pc.load_metas(stage_dir)
-    if not metas:
-        print("[WARN] user-post: no staged variants — skip", flush=True)
-        return
-    env = pc.shared_env(metas[0])
-    download = rm.download_url(env)
-    changelogs = rm.changelogs_url(env)
-
     client = TelegramClient(StringSession(session), int(api_id), api_hash)
     await client.start()
     try:
-        base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "banner")
-        banners = sorted({p for pat in BANNER_PATTERNS for p in glob.glob(os.path.join(base, pat))})
-        if banners:
-            await client.send_file(target, banners[0], caption=short_caption(env, download))
-        await client.send_message(target, compose_text(env, download, changelogs), link_preview=False)
-        if not download:
-            for meta in metas:
-                await client.send_file(target, meta["zip_path"], caption=meta["zip_name"])
-        print(f"[info] user-post: terkirim ke {target} ✅", flush=True)
+        # Satu channel gagal tidak menghentikan channel lainnya.
+        for target in targets:
+            try:
+                if text_mode:
+                    await client.send_message(target, message, link_preview=False)
+                    print(f"[info] user-post: notif terkirim ke {target} ✅", flush=True)
+                    continue
+
+                if banners:
+                    await client.send_file(target, banners[0], caption=short_caption(env, download))
+                await client.send_message(target, compose_text(env, download, changelogs), link_preview=False)
+                if not download:
+                    for meta in metas:
+                        await client.send_file(target, meta["zip_path"], caption=meta["zip_name"])
+                print(f"[info] user-post: terkirim ke {target} ✅", flush=True)
+            except Exception as exc:  # noqa: BLE001 - lanjut ke channel berikutnya
+                print(f"[WARN] user-post: gagal kirim ke {target}: {exc}", flush=True)
     finally:
         await client.disconnect()
 
