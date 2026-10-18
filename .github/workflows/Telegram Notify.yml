@@ -1,0 +1,345 @@
+name: Telegram Rich Notify
+
+# ======================================================
+# 📨 NOTIFY RICH TELEGRAM (workflow terpisah)
+# ======================================================
+# File ini TIDAK build kernel — dia hanya "penarik" hasil dari run
+# terakhir workflow build, lalu kirim postingan rich (Bot API
+# sendRichMessage) ke Telegram.
+#
+# Sumber run yang diizinkan (path action):
+#   • .github/workflows/RedPanda Build.yml  ("Build RedPanda GKI Kernel")
+#   • .github/workflows/Build Testing.yml   ("Build Testing Kernel")
+#
+# Cara kerja:
+#   1. Otomatis jalan saat salah satu workflow di atas selesai
+#      (trigger workflow_run) — data diambil dari run itu sendiri.
+#   2. Manual via "Run workflow" → kolom run_id kosong = otomatis
+#      ambil run terakhir yang completed dari 2 workflow tersebut.
+#
+# Alur data:
+#   - Kalau run punya artifact "post-stage" (Build Testing) → langsung
+#     dipakai (zip sudah berisi redpanda.json).
+#   - Kalau tidak (RedPanda Build) → artifact build RedPanda-GKI-*
+#     di-download lalu di-stage ulang lewat release/telegram/stage.sh.
+#   - Pengiriman pakai release/telegram/post.sh (+ post_user.py bila
+#     secret Telethon tersedia).
+# ======================================================
+
+on:
+  workflow_run:
+    workflows:
+      - "Build RedPanda GKI Kernel"
+      - "Build Testing Kernel"
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID target (kosong = run terakhir RedPanda Build / Build Testing)'
+        required: false
+        default: ''
+      target:
+        description: 'Tujuan kirim (Auto = Group)'
+        required: false
+        default: 'Auto'
+        type: choice
+        options:
+          - Auto
+          - Group
+          - Channel
+      attach_file:
+        description: 'Lampirkan file zip ke Telegram (false = hanya tombol Download)'
+        required: false
+        default: false
+        type: boolean
+      notify_on_failure:
+        description: 'Kirim notifikasi kalau build gagal'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: telegram-rich-notify-${{ github.event.workflow_run.id || github.event.inputs.run_id || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  TZ: 'Asia/Jakarta'
+
+jobs:
+  notify:
+    name: Rich Telegram Notify
+    runs-on: ubuntu-24.04
+    # Guard "path action": hanya run dari 2 workflow ini yang diproses.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.path == '.github/workflows/RedPanda Build.yml' ||
+      github.event.workflow_run.path == '.github/workflows/Build Testing.yml'
+    steps:
+      - name: 🧭 Resolve run target (RedPanda Build / Build Testing)
+        id: run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ github.event.inputs.run_id }}
+          NOTIFY_ON_FAILURE: ${{ github.event.inputs.notify_on_failure }}
+        run: |
+          set -euo pipefail
+
+          RUN_ID="${INPUT_RUN_ID:-${EVENT_RUN_ID:-}}"
+
+          if [ -z "$RUN_ID" ]; then
+            echo "🔍 Mencari run terakhir dari RedPanda Build / Build Testing..."
+            RUN_ID="$(gh api "repos/${REPO}/actions/runs?per_page=100" \
+              --jq '[.workflow_runs[] | select(.status == "completed") | select(.path == ".github/workflows/RedPanda Build.yml" or .path == ".github/workflows/Build Testing.yml")][0].id // empty')"
+          fi
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::Tidak ada run target yang ditemukan (RedPanda Build / Build Testing)."
+            exit 1
+          fi
+
+          RUN_JSON="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}")"
+          RUN_PATH="$(jq -r '.path' <<< "$RUN_JSON")"
+
+          case "$RUN_PATH" in
+            ".github/workflows/RedPanda Build.yml"|".github/workflows/Build Testing.yml") ;;
+            *)
+              echo "::error::Run ${RUN_ID} bukan dari workflow yang diizinkan (path: ${RUN_PATH})."
+              exit 1
+              ;;
+          esac
+
+          CONCLUSION="$(jq -r '.conclusion // "unknown"' <<< "$RUN_JSON")"
+          STARTED="$(jq -r '.run_started_at // .created_at' <<< "$RUN_JSON")"
+          UPDATED="$(jq -r '.updated_at' <<< "$RUN_JSON")"
+
+          DURATION_SEC=$(( $(date -d "$UPDATED" +%s) - $(date -d "$STARTED" +%s) ))
+          if [ "$DURATION_SEC" -lt 0 ]; then DURATION_SEC=0; fi
+          DURATION="$((DURATION_SEC / 60))m $((DURATION_SEC % 60))s"
+
+          PROCEED="false"
+          if [ "$CONCLUSION" = "success" ]; then PROCEED="true"; fi
+
+          SUPPRESS_FAILURE="false"
+          if [ "${NOTIFY_ON_FAILURE:-}" = "false" ]; then SUPPRESS_FAILURE="true"; fi
+
+          {
+            echo "run_id=${RUN_ID}"
+            echo "run_path=${RUN_PATH}"
+            echo "run_url=$(jq -r '.html_url' <<< "$RUN_JSON")"
+            echo "run_number=$(jq -r '.run_number' <<< "$RUN_JSON")"
+            echo "run_attempt=$(jq -r '.run_attempt' <<< "$RUN_JSON")"
+            echo "workflow_name=$(jq -r '.name' <<< "$RUN_JSON")"
+            echo "conclusion=${CONCLUSION}"
+            echo "head_branch=$(jq -r '.head_branch // ""' <<< "$RUN_JSON")"
+            echo "head_sha=$(jq -r '.head_sha // ""' <<< "$RUN_JSON")"
+            echo "actor=$(jq -r '.actor.login // "unknown"' <<< "$RUN_JSON")"
+            echo "duration=${DURATION}"
+            echo "proceed=${PROCEED}"
+            echo "suppress_failure_notify=${SUPPRESS_FAILURE}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "🎯 Run #${RUN_ID} — ${RUN_PATH}"
+          echo "   status: ${CONCLUSION} | branch: $(jq -r '.head_branch // "-"' <<< "$RUN_JSON") | ${DURATION}"
+
+      - name: 📥 Checkout repository
+        if: steps.run.outputs.proceed == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.run.outputs.head_sha || github.event.repository.default_branch }}
+
+      - name: 📥 Ambil artifact post-stage dari run target
+        id: dl-stage
+        if: steps.run.outputs.proceed == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: post-stage
+          path: ${{ runner.temp }}/stage-dl
+          run-id: ${{ steps.run.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🧩 Siapkan staging + link download
+        id: stage
+        if: steps.run.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ steps.run.outputs.run_id }}
+          RUN_BRANCH: ${{ steps.run.outputs.head_branch }}
+          DL_DIR: ${{ runner.temp }}/stage-dl
+          ART_DIR: ${{ runner.temp }}/art-dl
+          STAGE_DIR: ${{ github.workspace }}/post-stage
+          KERNEL_REPO_TOKEN: ${{ secrets.KERNEL_REPO_TOKEN }}
+          KERNEL_SOURCE_OWNER: Artecxyz
+          KERNEL_SOURCE_REPO: RedPanda-kernel
+          CLANG_CHOICE: Neutron
+        run: |
+          set -euo pipefail
+          mkdir -p "$STAGE_DIR"
+
+          HAVE_STAGE="false"
+          if [ -d "$DL_DIR" ] && find "$DL_DIR" -name '*.zip' -print -quit | grep -q .; then
+            echo "✅ post-stage ditemukan di run #${RUN_ID} — pakai apa adanya."
+            find "$DL_DIR" -name '*.zip' -exec cp -f {} "$STAGE_DIR"/ \;
+            HAVE_STAGE="true"
+          else
+            echo "ℹ️ Run #${RUN_ID} tidak punya post-stage — fallback ke artifact build."
+          fi
+
+          if [ "$HAVE_STAGE" = "false" ]; then
+            ART_NAME="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.expired == false) | select(.name | startswith("RedPanda-GKI-"))][0].name // empty')"
+            if [ -z "$ART_NAME" ]; then
+              echo "::error::Tidak ada artifact RedPanda-GKI-* / post-stage di run #${RUN_ID}."
+              exit 1
+            fi
+
+            VARIANT="${ART_NAME#RedPanda-GKI-}"
+            echo "⬇️ Download artifact: ${ART_NAME} (variant ${VARIANT})"
+            rm -rf "$ART_DIR"
+            gh run download "$RUN_ID" --repo "$REPO" --name "$ART_NAME" --dir "$ART_DIR"
+
+            ZIP_PATH="$(find "$ART_DIR" -name '*.zip' -print -quit)"
+            if [ -z "$ZIP_PATH" ]; then
+              echo "::error::Zip tidak ditemukan di artifact ${ART_NAME}."
+              exit 1
+            fi
+            ZIP_NAME="$(basename "$ZIP_PATH")"
+
+            # Versi kernel best-effort dari Makefile kernel source.
+            KERNEL_FULL_VERSION="N/A"
+            KERNEL_VER="N/A"
+            if [ -n "$RUN_BRANCH" ]; then
+              AUTH=()
+              if [ -n "${KERNEL_REPO_TOKEN:-}" ]; then
+                AUTH=(-H "Authorization: Bearer ${KERNEL_REPO_TOKEN}")
+              fi
+              MAKEFILE="$(curl -fsSL "${AUTH[@]}" \
+                "https://raw.githubusercontent.com/${KERNEL_SOURCE_OWNER}/${KERNEL_SOURCE_REPO}/${RUN_BRANCH}/Makefile" 2>/dev/null || true)"
+              if [ -n "$MAKEFILE" ]; then
+                KV="$(grep -m1 '^VERSION =' <<< "$MAKEFILE" | awk '{print $3}')"
+                KP="$(grep -m1 '^PATCHLEVEL =' <<< "$MAKEFILE" | awk '{print $3}')"
+                KS="$(grep -m1 '^SUBLEVEL =' <<< "$MAKEFILE" | awk '{print $3}')"
+                if [ -n "$KV" ] && [ -n "$KP" ] && [ -n "$KS" ]; then
+                  KERNEL_VER="${KV}.${KP}"
+                  KERNEL_FULL_VERSION="${KV}.${KP}.${KS}"
+                fi
+              fi
+            fi
+
+            SUSFS_VERSION_TAG=""
+            ZIP_PATH="$ZIP_PATH" ZIP_NAME="$ZIP_NAME" \
+            SUSFS_VERSION_TAG="$SUSFS_VERSION_TAG" \
+            KSU_VARIANT="$VARIANT" \
+            KERNEL_FULL_VERSION="$KERNEL_FULL_VERSION" \
+            KERNEL_VER="$KERNEL_VER" \
+            KERNEL_BRANCH="$RUN_BRANCH" \
+            KERNEL_SOURCE_OWNER="$KERNEL_SOURCE_OWNER" \
+            KERNEL_SOURCE_REPO="$KERNEL_SOURCE_REPO" \
+            CLANG_CHOICE="$CLANG_CHOICE" \
+            STAGE_DIR="$STAGE_DIR" \
+              bash release/telegram/stage.sh
+          fi
+
+          if [ -z "$(find "$STAGE_DIR" -name '*.zip' -print -quit)" ]; then
+            echo "::error::Staging kosong — tidak ada yang bisa dikirim."
+            exit 1
+          fi
+
+          # Link tombol Download: halaman artifact run, atau halaman Releases.
+          HAS_ARTIFACT="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/artifacts?per_page=100" \
+            --jq '[.artifacts[] | select(.expired == false) | select(.name | startswith("RedPanda-GKI-"))] | length')"
+          if [ "${HAS_ARTIFACT:-0}" -gt 0 ]; then
+            DL_URL="https://github.com/${REPO}/actions/runs/${RUN_ID}#artifacts"
+          else
+            DL_URL="https://github.com/${REPO}/releases"
+          fi
+          echo "download_url=${DL_URL}" >> "$GITHUB_OUTPUT"
+          echo "✅ Staging siap: $(find "$STAGE_DIR" -name '*.zip' -printf '%f\n' | tr '\n' ' ')"
+
+      - name: 📨 Kirim Rich Post ke Telegram
+        if: steps.run.outputs.proceed == 'true'
+        env:
+          ROOT_DIR: ${{ github.workspace }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
+          TELEGRAM_API_BASE: https://api.telegram.org
+          TELEGRAM_GROUP: ArtecxyzArchive
+          TELEGRAM_TARGET: ${{ github.event.inputs.target || 'Auto' }}
+          ATTACH_FILE: ${{ github.event.inputs.attach_file || vars.TELEGRAM_ATTACH_FILE || 'false' }}
+          POST_BANNER: '1'
+          RUN_MODE: Build
+          STAGE_DIR: ${{ github.workspace }}/post-stage
+          DOWNLOAD_URL: ${{ steps.stage.outputs.download_url }}
+        run: bash release/telegram/post.sh
+
+      - name: 👤 Kirim via akun pribadi (channel 2)
+        if: steps.run.outputs.proceed == 'true'
+        continue-on-error: true
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+          TG_CHANNEL_2: ${{ secrets.CHANNEL_2 }}
+          DOWNLOAD_URL: ${{ steps.stage.outputs.download_url }}
+          STAGE_DIR: ${{ github.workspace }}/post-stage
+        run: |
+          pip install -q telethon
+          python3 release/telegram/post_user.py
+
+      - name: ❌ Notify build gagal
+        if: |
+          steps.run.outputs.proceed != 'true' &&
+          steps.run.outputs.suppress_failure_notify != 'true' &&
+          steps.run.outputs.run_id != ''
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BOT_TOKEN:-}" ]; then
+            echo "[WARN] BOT_TOKEN belum di-set — skip notif gagal."
+            exit 0
+          fi
+          if [ -z "${CHAT_ID:-}" ]; then
+            echo "[WARN] CHAT_ID belum di-set — skip notif gagal."
+            exit 0
+          fi
+
+          TEXT="$(cat <<EOF
+          <b>❌ Build gagal — ${{ steps.run.outputs.workflow_name }}</b>
+
+          <b>🏷️ Run:</b> <a href="${{ steps.run.outputs.run_url }}">#${{ steps.run.outputs.run_number }}</a> (attempt ${{ steps.run.outputs.run_attempt }})
+          <b>🌿 Branch:</b> ${{ steps.run.outputs.head_branch }}
+          <b>📉 Status:</b> ${{ steps.run.outputs.conclusion }}
+          <b>🕒 Durasi:</b> ${{ steps.run.outputs.duration }}
+          <b>👤 Aktor:</b> ${{ steps.run.outputs.actor }}
+          EOF
+          )"
+
+          if [ -n "${MESSAGE_THREAD_ID:-}" ]; then
+            curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "message_thread_id=${MESSAGE_THREAD_ID}" \
+              -F "parse_mode=HTML" \
+              -F 'link_preview_options={"is_disabled":true}' \
+              -F "text=${TEXT}" > /dev/null
+          else
+            curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+              -F "chat_id=${CHAT_ID}" \
+              -F "parse_mode=HTML" \
+              -F 'link_preview_options={"is_disabled":true}' \
+              -F "text=${TEXT}" > /dev/null
+          fi
+          echo "✅ Notif gagal terkirim."
