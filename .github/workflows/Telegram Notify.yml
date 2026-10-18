@@ -25,10 +25,19 @@ name: Telegram Rich Notify
 #   - Pengiriman pakai release/telegram/post.sh (+ post_user.py bila
 #     secret Telethon tersedia).
 #
+# Routing tujuan kirim (mengikuti workflow asal):
+#   • RedPanda Build  -> CHANNEL (secret CHANNEL_ID), layout Release
+#   • Build Testing   -> GROUP   (secret CHAT_ID + MESSAGE_THREAD_ID)
+#
+#   Channel  : zip TIDAK dilampirkan, tombol Download dari halaman artifact
+#              / Releases.
+#   Group    : zip dilampirkan ke Telegram (layout Build tidak punya baris
+#              tombol Download).
+#
 # Opsi saat Run workflow (manual):
 #   run_id           : kosong = otomatis run terakhir RedPanda Build / Build Testing
-#   target           : Auto | Group | Channel
-#   attach_file      : true = zip dilampirkan ke Telegram
+#   target           : Auto (ikut workflow asal) | Group | Channel
+#   attach_file      : Auto (Group: true, Channel: false) | true | false
 #   notify_on_failure: false = jangan kirim notif saat build gagal
 #   download_url     : link tombol Download manual
 #   changelogs_url   : link tombol Changelogs manual
@@ -36,6 +45,7 @@ name: Telegram Rich Notify
 # Kalau download_url / changelogs_url dikosongkan, nilainya diambil dari
 # repository variable TELEGRAM_DOWNLOAD_URL / TELEGRAM_CHANGELOGS_URL,
 # lalu fallback otomatis (halaman artifact run / Releases / commit kernel).
+# attach_file juga bisa dipaksa lewat repository variable TELEGRAM_ATTACH_FILE.
 # ======================================================
 
 on:
@@ -51,7 +61,7 @@ on:
         required: false
         default: ''
       target:
-        description: 'Tujuan kirim (Auto = Group)'
+        description: 'Tujuan kirim (Auto = ikut workflow asal)'
         required: false
         default: 'Auto'
         type: choice
@@ -60,10 +70,14 @@ on:
           - Group
           - Channel
       attach_file:
-        description: 'Lampirkan file zip ke Telegram (false = hanya tombol Download)'
+        description: 'Lampirkan file zip (Auto = Group: ya, Channel: tidak)'
         required: false
-        default: false
-        type: boolean
+        default: 'Auto'
+        type: choice
+        options:
+          - Auto
+          - 'true'
+          - 'false'
       notify_on_failure:
         description: 'Kirim notifikasi kalau build gagal'
         required: false
@@ -106,6 +120,9 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
           INPUT_RUN_ID: ${{ github.event.inputs.run_id }}
+          INPUT_TARGET: ${{ github.event.inputs.target }}
+          INPUT_ATTACH: ${{ github.event.inputs.attach_file }}
+          VARS_ATTACH: ${{ vars.TELEGRAM_ATTACH_FILE }}
           NOTIFY_ON_FAILURE: ${{ github.event.inputs.notify_on_failure }}
         run: |
           set -euo pipefail
@@ -148,6 +165,37 @@ jobs:
           SUPPRESS_FAILURE="false"
           if [ "${NOTIFY_ON_FAILURE:-}" = "false" ]; then SUPPRESS_FAILURE="true"; fi
 
+          # ---- Routing tujuan kirim (default ikut workflow asal) ----
+          #   RedPanda Build -> Channel | Build Testing -> Group
+          case "$RUN_PATH" in
+            ".github/workflows/RedPanda Build.yml") DEFAULT_TARGET="Channel" ;;
+            *) DEFAULT_TARGET="Group" ;;
+          esac
+
+          TARGET="${INPUT_TARGET:-Auto}"
+          if [ -z "$TARGET" ] || [ "$TARGET" = "Auto" ]; then
+            TARGET="$DEFAULT_TARGET"
+          fi
+
+          # Channel: layout Release + tombol Download (zip tidak dilampirkan).
+          # Group  : layout Build + zip dilampirkan (Build tidak punya tombol).
+          if [ "$TARGET" = "Channel" ]; then
+            RUN_MODE="Release"
+            DEFAULT_ATTACH="false"
+          else
+            RUN_MODE="Build"
+            DEFAULT_ATTACH="true"
+          fi
+
+          # attach_file: input manual > repo variable > default per target.
+          ATTACH="${INPUT_ATTACH:-}"
+          if [ -z "$ATTACH" ] || [ "$ATTACH" = "Auto" ]; then
+            ATTACH="${VARS_ATTACH:-}"
+          fi
+          if [ -z "$ATTACH" ]; then
+            ATTACH="$DEFAULT_ATTACH"
+          fi
+
           {
             echo "run_id=${RUN_ID}"
             echo "run_path=${RUN_PATH}"
@@ -162,10 +210,14 @@ jobs:
             echo "duration=${DURATION}"
             echo "proceed=${PROCEED}"
             echo "suppress_failure_notify=${SUPPRESS_FAILURE}"
+            echo "target=${TARGET}"
+            echo "run_mode=${RUN_MODE}"
+            echo "attach_file=${ATTACH}"
           } >> "$GITHUB_OUTPUT"
 
           echo "🎯 Run #${RUN_ID} — ${RUN_PATH}"
           echo "   status: ${CONCLUSION} | branch: $(jq -r '.head_branch // "-"' <<< "$RUN_JSON") | ${DURATION}"
+          echo "   tujuan: ${TARGET} (mode ${RUN_MODE}, attach_file=${ATTACH})"
 
       - name: 📥 Checkout repository
         if: steps.run.outputs.proceed == 'true'
@@ -199,7 +251,7 @@ jobs:
           KERNEL_SOURCE_OWNER: Artecxyz
           KERNEL_SOURCE_REPO: RedPanda-kernel
           CLANG_CHOICE: Neutron
-          ATTACH_FILE: ${{ github.event.inputs.attach_file || vars.TELEGRAM_ATTACH_FILE || 'false' }}
+          ATTACH_FILE: ${{ steps.run.outputs.attach_file }}
         run: |
           set -euo pipefail
           mkdir -p "$STAGE_DIR"
@@ -305,10 +357,11 @@ jobs:
           MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
           TELEGRAM_API_BASE: https://api.telegram.org
           TELEGRAM_GROUP: ArtecxyzArchive
-          TELEGRAM_TARGET: ${{ github.event.inputs.target || 'Auto' }}
-          ATTACH_FILE: ${{ github.event.inputs.attach_file || vars.TELEGRAM_ATTACH_FILE || 'false' }}
+          # Routing: RedPanda Build -> Channel, Build Testing -> Group.
+          TELEGRAM_TARGET: ${{ steps.run.outputs.target }}
+          ATTACH_FILE: ${{ steps.run.outputs.attach_file }}
           POST_BANNER: '1'
-          RUN_MODE: Build
+          RUN_MODE: ${{ steps.run.outputs.run_mode }}
           STAGE_DIR: ${{ github.workspace }}/post-stage
           # Prioritas: input manual -> repo variable -> hasil auto (halaman artifact/Releases).
           DOWNLOAD_URL: ${{ github.event.inputs.download_url || vars.TELEGRAM_DOWNLOAD_URL || steps.stage.outputs.download_url }}
@@ -338,15 +391,28 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
+          TARGET: ${{ steps.run.outputs.target }}
         run: |
           set -euo pipefail
           if [ -z "${BOT_TOKEN:-}" ]; then
             echo "[WARN] BOT_TOKEN belum di-set — skip notif gagal."
             exit 0
           fi
-          if [ -z "${CHAT_ID:-}" ]; then
-            echo "[WARN] CHAT_ID belum di-set — skip notif gagal."
+
+          # Sama seperti post sukses: RedPanda Build -> Channel, lainnya -> Group.
+          CHAT="${CHAT_ID:-}"
+          THREAD="${MESSAGE_THREAD_ID:-}"
+          if [ "${TARGET:-Group}" = "Channel" ]; then
+            if [ -n "${CHANNEL_ID:-}" ]; then
+              CHAT="${CHANNEL_ID}"
+              THREAD=""
+            fi
+          fi
+
+          if [ -z "$CHAT" ]; then
+            echo "[WARN] chat tujuan belum di-set — skip notif gagal."
             exit 0
           fi
 
@@ -361,18 +427,18 @@ jobs:
           EOF
           )"
 
-          if [ -n "${MESSAGE_THREAD_ID:-}" ]; then
+          if [ -n "${THREAD:-}" ]; then
             curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-              -F "chat_id=${CHAT_ID}" \
-              -F "message_thread_id=${MESSAGE_THREAD_ID}" \
+              -F "chat_id=${CHAT}" \
+              -F "message_thread_id=${THREAD}" \
               -F "parse_mode=HTML" \
               -F 'link_preview_options={"is_disabled":true}' \
               -F "text=${TEXT}" > /dev/null
           else
             curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-              -F "chat_id=${CHAT_ID}" \
+              -F "chat_id=${CHAT}" \
               -F "parse_mode=HTML" \
               -F 'link_preview_options={"is_disabled":true}' \
               -F "text=${TEXT}" > /dev/null
           fi
-          echo "✅ Notif gagal terkirim."
+          echo "✅ Notif gagal terkirim ke ${TARGET}."
