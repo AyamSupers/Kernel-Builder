@@ -24,6 +24,18 @@ name: Telegram Rich Notify
 #     di-download lalu di-stage ulang lewat release/telegram/stage.sh.
 #   - Pengiriman pakai release/telegram/post.sh (+ post_user.py bila
 #     secret Telethon tersedia).
+#
+# Opsi saat Run workflow (manual):
+#   run_id           : kosong = otomatis run terakhir RedPanda Build / Build Testing
+#   target           : Auto | Group | Channel
+#   attach_file      : true = zip dilampirkan ke Telegram
+#   notify_on_failure: false = jangan kirim notif saat build gagal
+#   download_url     : link tombol Download manual
+#   changelogs_url   : link tombol Changelogs manual
+#
+# Kalau download_url / changelogs_url dikosongkan, nilainya diambil dari
+# repository variable TELEGRAM_DOWNLOAD_URL / TELEGRAM_CHANGELOGS_URL,
+# lalu fallback otomatis (halaman artifact run / Releases / commit kernel).
 # ======================================================
 
 on:
@@ -57,6 +69,14 @@ on:
         required: false
         default: true
         type: boolean
+      changelogs_url:
+        description: 'Changelogs URL (link tombol Changelogs, kosong = commit kernel)'
+        required: false
+        default: ''
+      download_url:
+        description: 'Download URL manual (link tombol Download, kosong = auto halaman artifact / Releases)'
+        required: false
+        default: ''
 
 permissions:
   actions: read
@@ -179,6 +199,7 @@ jobs:
           KERNEL_SOURCE_OWNER: Artecxyz
           KERNEL_SOURCE_REPO: RedPanda-kernel
           CLANG_CHOICE: Neutron
+          ATTACH_FILE: ${{ github.event.inputs.attach_file || vars.TELEGRAM_ATTACH_FILE || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p "$STAGE_DIR"
@@ -260,7 +281,16 @@ jobs:
           else
             DL_URL="https://github.com/${REPO}/releases"
           fi
-          echo "download_url=${DL_URL}" >> "$GITHUB_OUTPUT"
+
+          # attach_file=true -> tombol Download dikosongkan dulu supaya
+          # post_card.py benar-benar melampirkan zip (kalau DOWNLOAD_URL
+          # terisi, dia cuma kirim tombol). post_card akan otomatis pakai
+          # halaman Releases sebagai tombol fallback.
+          if [ "${ATTACH_FILE:-false}" = "true" ]; then
+            echo "download_url=" >> "$GITHUB_OUTPUT"
+          else
+            echo "download_url=${DL_URL}" >> "$GITHUB_OUTPUT"
+          fi
           echo "✅ Staging siap: $(find "$STAGE_DIR" -name '*.zip' -printf '%f\n' | tr '\n' ' ')"
 
       - name: 📨 Kirim Rich Post ke Telegram
@@ -280,7 +310,9 @@ jobs:
           POST_BANNER: '1'
           RUN_MODE: Build
           STAGE_DIR: ${{ github.workspace }}/post-stage
-          DOWNLOAD_URL: ${{ steps.stage.outputs.download_url }}
+          # Prioritas: input manual -> repo variable -> hasil auto (halaman artifact/Releases).
+          DOWNLOAD_URL: ${{ github.event.inputs.download_url || vars.TELEGRAM_DOWNLOAD_URL || steps.stage.outputs.download_url }}
+          CHANGELOG_URL: ${{ github.event.inputs.changelogs_url || vars.TELEGRAM_CHANGELOGS_URL || '' }}
         run: bash release/telegram/post.sh
 
       - name: 👤 Kirim via akun pribadi (channel 2)
@@ -291,7 +323,8 @@ jobs:
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION: ${{ secrets.TG_SESSION }}
           TG_CHANNEL_2: ${{ secrets.CHANNEL_2 }}
-          DOWNLOAD_URL: ${{ steps.stage.outputs.download_url }}
+          DOWNLOAD_URL: ${{ github.event.inputs.download_url || vars.TELEGRAM_DOWNLOAD_URL || steps.stage.outputs.download_url }}
+          CHANGELOG_URL: ${{ github.event.inputs.changelogs_url || vars.TELEGRAM_CHANGELOGS_URL || '' }}
           STAGE_DIR: ${{ github.workspace }}/post-stage
         run: |
           pip install -q telethon
