@@ -18,38 +18,11 @@ on:
         type: choice
         options:
           - Neutron
-      telegram_notify:
-        description: 'Send Telegram notification'
-        required: true
-        type: boolean
-        default: true
-      telegram_target:
-        description: 'Telegram target (Auto = Channel kalau Release, Grup kalau Build)'
-        required: false
-        default: 'Auto'
-        type: choice
-        options:
-          - Auto
-          - Group
-          - Channel
-      attach_file:
-        description: 'Lampirkan file zip ke Telegram (false = hanya link Download)'
-        required: false
-        default: true
-        type: boolean
       github_release:
         description: 'Create GitHub Release'
         required: false
         default: false
         type: boolean
-      changelogs_url:
-        description: 'Changelogs URL (link tombol Changelogs, kosong = commit kernel)'
-        required: false
-        default: ''
-      download_url:
-        description: 'Download URL manual (link tombol Download, kosong = auto PixelDrain / GitHub Releases)'
-        required: false
-        default: ''
 
 permissions:
   contents: write
@@ -64,8 +37,6 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    outputs:
-      download_url: ${{ steps.pixeldrain.outputs.url }}
     env:
       CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
       CCACHE_NOHASHDIR: "true"
@@ -376,7 +347,6 @@ jobs:
           zip -r9 "../$ZIP_NAME" ./*
 
       - name: 📨 Stage for Telegram post
-        if: github.event.inputs.telegram_notify == 'true'
         env:
           KSU_VARIANT: ${{ github.event.inputs.kernelsu_variant }}
           KSUVER: ${{ env.KSUVER }}
@@ -395,17 +365,14 @@ jobs:
 
       - name: 🪞 Mirror to PixelDrain
         id: pixeldrain
-        if: github.event.inputs.telegram_notify == 'true'
         env:
           PIXELDRAIN_API_KEY: ${{ secrets.PIXELDRAIN_API_KEY }}
-          DOWNLOAD_URL: ${{ github.event.inputs.download_url }}
           STAGE_DIR: ${{ github.workspace }}/post-stage
         run: |
           URL="$(bash release/telegram/mirror_pixeldrain.sh | tail -n 1)"
           echo "url=${URL}" >> "$GITHUB_OUTPUT"
 
       - name: 📤 Upload post-stage
-        if: github.event.inputs.telegram_notify == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: post-stage
@@ -440,43 +407,3 @@ jobs:
         with:
           path: ${{ env.LDCACHE_DIR }}
           key: thinlto-cache-${{ runner.os }}-${{ env.KERNEL_FULL_VERSION }}
-
-  notify:
-    name: Telegram Notify
-    runs-on: ubuntu-24.04
-    needs: build
-    if: github.event.inputs.telegram_notify == 'true' && always()
-    steps:
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v7
-
-      - name: 📥 Download Post Stage
-        uses: actions/download-artifact@v8
-        with:
-          name: post-stage
-          path: /tmp/post-stage
-
-      - name: 📨 Send Post
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          MESSAGE_THREAD_ID: ${{secrets.MESSAGE_THREAD_ID}}
-          TELEGRAM_API_BASE: https://api.telegram.org
-          TELEGRAM_TARGET: ${{ github.event.inputs.telegram_target }}
-          ATTACH_FILE: ${{ github.event.inputs.attach_file }}
-          CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
-          DOWNLOAD_URL: ${{ needs.build.outputs.download_url }}
-        run: bash release/telegram/post.sh
-
-      - name: 👤 Send via akun pribadi (channel 2)
-        env:
-          TG_API_ID: ${{ secrets.TG_API_ID }}
-          TG_API_HASH: ${{ secrets.TG_API_HASH }}
-          TG_SESSION: ${{ secrets.TG_SESSION }}
-          TG_CHANNEL_2: ${{ secrets.CHANNEL_2 }}
-          DOWNLOAD_URL: ${{ needs.build.outputs.download_url }}
-          CHANGELOG_URL: ${{ github.event.inputs.changelogs_url }}
-          STAGE_DIR: /tmp/post-stage
-        run: |
-          pip install -q telethon
-          python3 release/telegram/post_user.py
