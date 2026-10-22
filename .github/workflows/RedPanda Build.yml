@@ -18,6 +18,11 @@ on:
         type: choice
         options:
           - Neutron
+      telegram_notify:
+        description: 'Send Telegram notification'
+        required: true
+        type: boolean
+        default: true
       github_release:
         description: 'Create GitHub Release'
         required: false
@@ -357,6 +362,43 @@ jobs:
           tag_name: ${{ github.event.inputs.kernelsu_variant }}-${{ env.KSUVER }}
           name: RedPanda GKI ${{ github.event.inputs.kernelsu_variant }} v${{ env.KSUVER }} - ${{ env.KERNEL_FULL_VERSION }}
           files: kernel_workspace/*.zip
+
+      - name: 📨 Send Telegram (simple)
+        if: github.event.inputs.telegram_notify == 'true'
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          MESSAGE_THREAD_ID: ${{ secrets.MESSAGE_THREAD_ID }}
+        run: |
+          BUILD_END=$(date +%s)
+          BUILD_DUR=$((BUILD_END - BUILD_START))
+          BUILD_MIN=$((BUILD_DUR / 60))
+          BUILD_SEC=$((BUILD_DUR % 60))
+
+          cat > /tmp/tg_caption.html <<EOF
+          <b>Kernel Build Successful!</b>
+
+          <b>👤 Author:</b> @Artecxyz
+          <b>📆 Build Time:</b> $(date "+%H:%M:%S - %d/%m/%Y")
+          <b>🕒 Build Speed:</b> ${BUILD_MIN} minutes ${BUILD_SEC} second
+          <b>📦 Variant:</b> ${{ github.event.inputs.kernelsu_variant }} (ver ${{ env.KSUVER }})
+          <b>🌐 Kernel version:</b> ${{ env.KERNEL_FULL_VERSION }}
+          <b>🔧 Toolchain:</b> ${{ github.event.inputs.clang_choice }} Clang
+          EOF
+
+          ZIP_PATH=$(ls kernel_workspace/RedPanda-GKI-*.zip 2>/dev/null | head -n 1)
+          if [ -z "$ZIP_PATH" ]; then
+            echo "⚠️ ZIP not found, skipping upload."
+            exit 0
+          fi
+          echo "📦 File: $ZIP_PATH ($(du -h "$ZIP_PATH" | cut -f1))"
+
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F chat_id="${CHAT_ID}" \
+            -F message_thread_id="${MESSAGE_THREAD_ID}" \
+            -F document=@"${ZIP_PATH}" \
+            -F caption="</tmp/tg_caption.html" \
+            -F parse_mode="HTML"
 
       - name: 📦 Save Cache
         uses: actions/cache/save@v6
