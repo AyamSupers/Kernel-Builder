@@ -23,6 +23,11 @@ on:
         required: true
         type: boolean
         default: true
+      schednew:
+        description: 'New Scheduler'
+        required: false
+        default: false
+        type: boolean
       github_release:
         description: 'Create GitHub Release'
         required: false
@@ -215,7 +220,7 @@ jobs:
           echo "✅ KSU tag: ${KSU_TAG}"
 
       - name: Enable New Sched
-        if: inputs.sched
+        if: inputs.schednew
         working-directory: kernel_workspace
         run: |
           patch -p1 < $GITHUB_WORKSPACE/patches/0001-linux6.6-Smartutil-v0.1.0.patch
