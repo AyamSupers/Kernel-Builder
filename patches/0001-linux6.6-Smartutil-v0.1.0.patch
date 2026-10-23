@@ -50,8 +50,8 @@ governor is selected at runtime with
  drivers/cpufreq/Kconfig          |   34 ++++++++++++++++++++++++++++++++++
  kernel/sched/Makefile            |    1 +
  kernel/sched/cpufreq_schedutil.c |   13 +++++++++++++
- kernel/sched/smartutil.c         | 1303 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- 4 files changed, 1351 insertions(+)
+ kernel/sched/smartutil.c         | 1321 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 1369 insertions(+)
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 --- a/drivers/cpufreq/Kconfig
@@ -138,7 +138,7 @@ diff --git a/kernel/sched/smartutil.c b/kernel/sched/smartutil.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/smartutil.c
-@@ -0,0 +1,1303 @@
+@@ -0,0 +1,1321 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil - smart, thermal friendly cpufreq governor.
@@ -210,6 +210,13 @@ new file mode 100644
 +#include <linux/spinlock.h>
 +#include <linux/sysfs.h>
 +#include <trace/hooks/sched.h>
++/*
++ * struct sched_attr is only forward declared in <linux/sched.h>.  The
++ * original cpufreq_schedutil.c never asks for it because it is #included by
++ * build_utility.c, which pulls in <uapi/linux/sched/types.h> first; this file
++ * is a standalone translation unit and has to do so itself.
++ */
++#include <uapi/linux/sched/types.h>
 +
 +#include "sched.h"
 +
@@ -1150,6 +1157,17 @@ new file mode 100644
 +};
 +
 +/*
++ * Forward declarations: smartutil_gov is instantiated here, but the callbacks
++ * are defined further down (cpufreq_schedutil.c keeps the same order, defining
++ * schedutil_gov only after every sugov_* callback).
++ */
++static int smart_init(struct cpufreq_policy *policy);
++static void smart_exit(struct cpufreq_policy *policy);
++static int smart_start(struct cpufreq_policy *policy);
++static void smart_stop(struct cpufreq_policy *policy);
++static void smart_limits(struct cpufreq_policy *policy);
++
++/*
 + * Deliberately not static: cpufreq_default_governor() in
 + * kernel/sched/cpufreq_schedutil.c returns this governor when
 + * CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL is selected, so the symbol has to be
@@ -1444,4 +1462,3 @@ new file mode 100644
 +cpufreq_governor_init(smartutil_gov);
 -- 
 2.56.0
-
