@@ -7,31 +7,30 @@ Smartutil v0.1.0 - thermal friendly cpufreq governor for GKI AOSP
 (Android 15, 6.6 LTS), derived from schedutil.
 
 Smartutil is a thermal friendly cpufreq governor derived from schedutil.
-It consumes the same scheduler utilization data, but adds three load
-modes:
+It consumes the same scheduler utilization data, but adds two things, and
+neither of them is a "mode" - both are plain continuous functions of the
+utilization, in the spirit of the other schedutil derivatives.
 
-  IDLE     The frequency is kept low and hard capped well below the
-           maximum, so an idle device stays cool and efficient.
+  1. A frequency ceiling that follows the utilization.  The raw schedutil
+     frequency is capped at a percentage of policy->max that is
+     interpolated between idle_freq_cap_pct (at or below
+     idle_util_thresh) and heavy_freq_cap_pct (at or above
+     heavy_util_thresh).  Light load is therefore held well below the top
+     of the range, heavy load still gets the frequency it asks for, and
+     there is no threshold to cross and no per-policy state to keep.
 
-  NORMAL   Plain schedutil behaviour.
+  2. A ramp limit on every frequency change.  The committed frequency
+     moves towards the target by at most ramp_up_step_pct (rising) or
+     ramp_down_step_pct (falling) of policy->max per 1 ms window, so a
+     game that suddenly wants maximum performance ramps up instead of
+     jumping straight there and the resulting temperature spike stays
+     small.
 
-  HEAVY    The CPU gets the frequency it actually needs, but the target
-           is ramped up gradually instead of jumping straight to the
-           maximum, and it is capped below max (with an even lower cap
-           after a sustained heavy period) so the phone does not heat
-           up.
-
-The load mode is always evaluated on the plain scheduler
-utilization, before the schedutil iowait boost is applied, so a burst of
-IO wakeups can never be mistaken for a heavy CPU load and put the
-governor into the ramp limited HEAVY mode.  The boost still boosts the
-requested frequency, exactly as it does in schedutil.
-
-For the same reason the ramp up step is skipped while an iowait boost is
-in flight: the CPU is only busy because of IO wakeups, so ramping it up
-would just add latency to a task that wants to go back to sleep as soon
-as possible.  Ramping down still applies and the mode caps are still
-enforced, so the thermal target is not weakened by this.
+The ramp up step is skipped while an iowait boost is in flight: the CPU is
+only busy because of IO wakeups, so ramping it up would just add latency
+to a task that wants to go back to sleep as soon as possible.  Ramping
+down still applies and the utilization based ceiling is still enforced,
+so the thermal target is not weakened by this.
 
 The governor can also be made the default one with
 CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL, which is added to the "Default
@@ -50,8 +49,8 @@ governor is selected at runtime with
  drivers/cpufreq/Kconfig          |   34 ++++++++++++++++++++++++++++++++++
  kernel/sched/Makefile            |    1 +
  kernel/sched/cpufreq_schedutil.c |   13 +++++++++++++
- kernel/sched/smartutil.c         | 1321 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- 4 files changed, 1369 insertions(+)
+ kernel/sched/smartutil.c         | 1235 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 1283 insertions(+)
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 --- a/drivers/cpufreq/Kconfig
@@ -138,36 +137,46 @@ diff --git a/kernel/sched/smartutil.c b/kernel/sched/smartutil.c
 new file mode 100644
 --- /dev/null
 +++ b/kernel/sched/smartutil.c
-@@ -0,0 +1,1321 @@
+@@ -0,0 +1,1235 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil - smart, thermal friendly cpufreq governor.
 + *
 + * Derived from the scheduler utilization based governor (schedutil,
-+ * kernel/sched/cpufreq_schedutil.c).
++ * kernel/sched/cpufreq_schedutil.c): the whole scheduling interface
++ * (utilization sampling, iowait boost, rate limiting, kthread and fast
++ * switch handling) is unchanged.  Smartutil adds two things on top, and
++ * neither of them is a "mode" - both are plain continuous functions of the
++ * utilization, in the spirit of the other schedutil derivatives.
 + *
-+ * Behaviour:
++ * 1. A frequency ceiling that follows the utilization
 + *
-+ *   IDLE / light load
-+ *       The frequency is kept low and hard capped well below the maximum
-+ *       ("idle_freq_cap_pct" of policy->max), so the device stays cool and
-+ *       efficient whenever there is nothing heavy to do.
++ *    The raw schedutil frequency is capped at a percentage of policy->max
++ *    that is interpolated between two points, so there is no threshold to
++ *    cross and no state machine:
 + *
-+ *   NORMAL
-+ *       Plain schedutil behaviour: the frequency is proportional to the
-+ *       utilization reported by the scheduler.
++ *      cap%  heavy_cap ┤                      ╱──────
++ *                     │                  ╱
++ *                     │              ╱
++ *      idle_cap  ┤──╱
++ *                     └──────────┬──────────────┬───── util%
++ *                             idle_util     heavy_util
 + *
-+ *   HEAVY (games, benchmarks, ...)
-+ *       The CPU gets the frequency it actually needs: the target is ramped
-+ *       up gradually instead of jumping straight to the maximum, and it is
-+ *       capped below max ("heavy_freq_cap_pct").  After a sustained heavy
-+ *       period an even lower cap ("heavy_sustain_cap_pct") is applied so the
-+ *       phone does not heat up.
++ *    Light load never gets past "idle_freq_cap_pct" and heavy load never
++ *    gets past "heavy_freq_cap_pct", so the CPU is never driven to the very
++ *    top of its range on demand alone and the device does not heat up.
++ *    Between the two points the cap tracks the utilization, so a heavy task
++ *    still gets the frequency it asks for.
 + *
-+ * Race to idle: while an iowait boost is in flight the ramp up step is
-+ * skipped, so a burst of IO wakeups is served immediately instead of
-+ * gradually.  Ramping down still applies and the mode caps are still
-+ * enforced, so this does not weaken the thermal target.
++ * 2. A ramp limit on every frequency change
++ *
++ *    The committed frequency moves towards the target by at most
++ *    "ramp_up_step_pct" (rising) or "ramp_down_step_pct" (falling) of
++ *    policy->max per 1 ms window.  A game that suddenly wants maximum
++ *    performance therefore ramps up instead of jumping straight there,
++ *    which keeps the temperature spike down, while a burst of IO wakeups
++ *    still gets its frequency immediately (ramping up is skipped while an
++ *    iowait boost is in flight).
 + *
 + * Everything is a percentage and can be tuned at runtime, e.g.
 + *
@@ -177,17 +186,14 @@ new file mode 100644
 + *
 + *   smart_enabled        master on/off switch (0 disables all Smartutil logic
 + *                        and the governor then behaves exactly like schedutil)
-+ *   idle_util_thresh     utilization (in % of capacity) below which the CPU is
-+ *                        considered idle
-+ *   idle_freq_cap_pct    hard frequency cap while idle (% of policy->max)
-+ *   heavy_util_thresh    utilization above which the CPU is considered heavy
-+ *   heavy_freq_cap_pct   frequency cap while heavy (% of policy->max)
-+ *   heavy_sustain_cap_pct  cap applied after "sustain_after_us" of heavy load
-+ *   sustain_after_us     how long heavy load must last before the sustain cap
-+ *   heavy_nr_running     number of runnable tasks that also implies heavy load
++ *   idle_util_thresh     utilization (in % of capacity) below which the
++ *                        ceiling is pinned to "idle_freq_cap_pct"
++ *   idle_freq_cap_pct    ceiling at or below "idle_util_thresh" (% of max)
++ *   heavy_util_thresh    utilization above which the ceiling is pinned to
++ *                        "heavy_freq_cap_pct"
++ *   heavy_freq_cap_pct   ceiling at or above "heavy_util_thresh" (% of max)
 + *   ramp_up_step_pct     max frequency increase per ramp window (1 ms), in %
 + *   ramp_down_step_pct   max frequency decrease per ramp window (1 ms), in %
-+ *   mode_hysteresis      hysteresis added to the mode thresholds
 + *   rate_limit_us        minimum time between two frequency updates
 + */
 +#include <linux/cpufreq.h>
@@ -232,13 +238,6 @@ new file mode 100644
 +#define SMART_RAMP_WINDOW_NS		(SMART_RAMP_WINDOW_US * NSEC_PER_USEC)
 +#define SMART_RAMP_WINDOW_CAP_NS	(SMART_RAMP_WINDOW_MAX * SMART_RAMP_WINDOW_NS)
 +
-+/* Load modes of the governor. */
-+enum smart_mode {
-+	SMART_MODE_IDLE		= 0,
-+	SMART_MODE_NORMAL	= 1,
-+	SMART_MODE_HEAVY	= 2,
-+};
-+
 +struct smart_tunables {
 +	struct gov_attr_set	attr_set;
 +	unsigned int		rate_limit_us;
@@ -248,12 +247,8 @@ new file mode 100644
 +	unsigned int		idle_freq_cap_pct;
 +	unsigned int		heavy_util_thresh;
 +	unsigned int		heavy_freq_cap_pct;
-+	unsigned int		heavy_sustain_cap_pct;
-+	unsigned int		sustain_after_us;
-+	unsigned int		heavy_nr_running;
 +	unsigned int		ramp_up_step_pct;
 +	unsigned int		ramp_down_step_pct;
-+	unsigned int		mode_hysteresis;
 +};
 +
 +struct smart_policy {
@@ -265,9 +260,6 @@ new file mode 100644
 +	s64			freq_update_delay_ns;
 +	unsigned int		next_freq;
 +	unsigned int		cached_raw_freq;
-+	/* Smartutil state (per policy). */
-+	enum smart_mode		mode;
-+	u64			heavy_since;
 +	/* The next fields are only needed if fast switch cannot be used: */
 +	struct			irq_work irq_work;
 +	struct			kthread_work work;
@@ -386,143 +378,83 @@ new file mode 100644
 +	 */
 +	return policy->cur + (policy->cur >> 2);
 +}
-+
 +/*
-+ * smart_pick_mode - select the load mode (idle / normal / heavy).
++ * smart_cap_pct - frequency ceiling, in percent of the frequency range, for
++ * the given utilization.
 + *
 + * @util is the CPU utilization in capacity scale (i.e. relative to @max) and
-+ * @nr_running the number of tasks runnable on the runqueue in question.
++ * is reduced to a percentage here.
 + *
-+ * Hysteresis is applied on both thresholds so the mode does not flap.
++ * The result is a continuous, piecewise linear function of the utilization:
++ *
++ *      cap%  heavy_cap ┤                      /------
++ *                     |                  /
++ *                     |              /
++ *      idle_cap  ----/
++ *                     +----------|--------------|----- util%
++ *                             idle_util     heavy_util
++ *
++ * so light load is held well below the top of the range, heavy load still
++ * gets the frequency it asks for, and there is no threshold to cross and
++ * nothing to keep state of.  A return value of 100 means "no ceiling".
 + */
-+static enum smart_mode smart_pick_mode(struct smart_policy *sg_policy,
-+				       unsigned long util, unsigned long max,
-+				       unsigned int nr_running, u64 time)
++static unsigned int smart_cap_pct(struct smart_tunables *tunables,
++				  unsigned long util, unsigned long max)
 +{
-+	struct smart_tunables *tunables = sg_policy->tunables;
-+	unsigned int util_pct, hyst;
-+	enum smart_mode mode;
++	unsigned int lo, hi, util_pct;
 +
-+	if (!tunables->smart_enabled || unlikely(!max)) {
-+		sg_policy->heavy_since = 0;
-+		sg_policy->mode = SMART_MODE_NORMAL;
-+		return SMART_MODE_NORMAL;
-+	}
++	if (!tunables->smart_enabled || unlikely(!max))
++		return 100;
 +
-+	util_pct = (unsigned int)(((u64)util * 100) / max);
++	util_pct = (unsigned int)((util * 100) / max);
 +	if (util_pct > 100)
 +		util_pct = 100;
 +
-+	hyst = min_t(unsigned int, tunables->mode_hysteresis,
-+		     tunables->heavy_util_thresh);
-+	hyst = min_t(unsigned int, hyst, tunables->idle_util_thresh);
++	lo = tunables->idle_util_thresh;
++	hi = tunables->heavy_util_thresh;
 +
-+	mode = sg_policy->mode;
++	if (util_pct <= lo)
++		return tunables->idle_freq_cap_pct;
++	if (util_pct >= hi)
++		return tunables->heavy_freq_cap_pct;
 +
-+	/*
-+	 * Heavy load (games, benchmarks, ...): enter on high utilization or
-+	 * when several tasks are runnable at the same time, leave with
-+	 * hysteresis.
-+	 */
-+	if (mode == SMART_MODE_HEAVY) {
-+		if (util_pct <= tunables->heavy_util_thresh - hyst &&
-+		    nr_running < tunables->heavy_nr_running)
-+			mode = SMART_MODE_NORMAL;
-+	} else if (util_pct >= tunables->heavy_util_thresh ||
-+		   (nr_running >= tunables->heavy_nr_running &&
-+		    util_pct + hyst >= tunables->heavy_util_thresh)) {
-+		mode = SMART_MODE_HEAVY;
-+	}
++	/* Guard against a misconfigured pair of thresholds. */
++	if (hi <= lo)
++		return tunables->idle_freq_cap_pct;
 +
-+	/*
-+	 * Idle / light load: enter on low utilization, leave with hysteresis.
-+	 */
-+	if (mode != SMART_MODE_HEAVY) {
-+		if (mode == SMART_MODE_IDLE) {
-+			if (util_pct >= tunables->idle_util_thresh + hyst)
-+				mode = SMART_MODE_NORMAL;
-+		} else if (util_pct <= tunables->idle_util_thresh) {
-+			mode = SMART_MODE_IDLE;
-+		}
-+	}
-+
-+	if (mode == SMART_MODE_HEAVY) {
-+		if (!sg_policy->heavy_since)
-+			sg_policy->heavy_since = time;
-+	} else {
-+		sg_policy->heavy_since = 0;
-+	}
-+
-+	sg_policy->mode = mode;
-+	return mode;
++	return tunables->idle_freq_cap_pct +
++		(unsigned int)(((unsigned long)(tunables->heavy_freq_cap_pct -
++						tunables->idle_freq_cap_pct) *
++				(util_pct - lo)) / (hi - lo));
 +}
 +
-+/*
-+ * Frequency (or performance) cap, in percent, for the current mode.  0 means
-+ * "no cap", 100 means "no cap either".
-+ */
-+static unsigned int smart_mode_cap_pct(struct smart_policy *sg_policy, u64 time)
-+{
-+	struct smart_tunables *tunables = sg_policy->tunables;
-+	unsigned int pct = 100;
-+
-+	switch (sg_policy->mode) {
-+	case SMART_MODE_IDLE:
-+		pct = tunables->idle_freq_cap_pct;
-+		break;
-+	case SMART_MODE_HEAVY:
-+		pct = tunables->heavy_freq_cap_pct;
-+		/*
-+		 * Sustained heavy load (long gaming session): drop a bit
-+		 * below the "burst" cap to keep the device cool.
-+		 */
-+		if (tunables->heavy_sustain_cap_pct && sg_policy->heavy_since &&
-+		    time > sg_policy->heavy_since &&
-+		    time - sg_policy->heavy_since >
-+		    (u64)tunables->sustain_after_us * NSEC_PER_USEC)
-+			pct = tunables->heavy_sustain_cap_pct;
-+		break;
-+	default:
-+		break;
-+	}
-+
-+	return pct;
-+}
-+
-+/* Cap a raw frequency (kHz) according to the current mode. */
++/* Cap a raw frequency (kHz) at the given percentage of policy->max. */
 +static unsigned int smart_cap_freq(struct smart_policy *sg_policy,
-+				   unsigned int freq, u64 time)
++				   unsigned int freq, unsigned int pct)
 +{
-+	struct cpufreq_policy *policy = sg_policy->policy;
-+	unsigned int pct, cap;
++	unsigned int cap;
 +
-+	if (!sg_policy->tunables->smart_enabled)
++	if (pct >= 100)
 +		return freq;
 +
-+	pct = smart_mode_cap_pct(sg_policy, time);
-+	if (!pct || pct >= 100)
-+		return freq;
-+
-+	cap = mult_frac(policy->max, pct, 100);
++	cap = mult_frac(sg_policy->policy->max, pct, 100);
 +	if (freq > cap)
 +		freq = cap;
 +
 +	return freq;
 +}
 +
-+/* Cap a performance level (capacity scale) according to the current mode. */
-+static unsigned long smart_cap_perf(struct smart_policy *sg_policy,
-+				    unsigned long util, unsigned long max,
-+				    u64 time)
++/*
++ * Cap a performance level (capacity scale) at the given percentage of the
++ * CPU capacity.  The perf path asks for a capacity, not a frequency, so the
++ * same ceiling is expressed in the same scale as @util.
++ */
++static unsigned long smart_cap_perf(unsigned long util, unsigned long max,
++				    unsigned int pct)
 +{
-+	unsigned int pct;
 +	unsigned long cap;
 +
-+	if (!sg_policy->tunables->smart_enabled)
-+		return util;
-+
-+	pct = smart_mode_cap_pct(sg_policy, time);
-+	if (!pct || pct >= 100)
++	if (pct >= 100)
 +		return util;
 +
 +	cap = mult_frac(max, pct, 100);
@@ -574,8 +506,8 @@ new file mode 100644
 +	 * busy because of IO wakeups, not because of real CPU load.  Let the
 +	 * boost raise the frequency immediately - ramping it up would just
 +	 * add latency to a task that wants to go back to sleep as soon as
-+	 * possible.  Ramping down still applies and the mode caps are still
-+	 * enforced, so the thermal target is not lost.
++	 * possible.  Ramping down still applies and the utilization based
++	 * ceiling is still enforced, so the thermal target is not lost.
 +	 */
 +	if (freq > last && sg_cpu->iowait_boost)
 +		return freq;
@@ -645,15 +577,21 @@ new file mode 100644
 + * @util: Current CPU utilization.
 + * @max: CPU capacity.
 + *
-+ * Same as schedutil, plus the Smartutil mode based frequency cap.
++ * Same as schedutil, plus the Smartutil utilization based frequency ceiling.
 + */
 +static unsigned int smart_get_next_freq(struct smart_policy *sg_policy,
-+					unsigned long util, unsigned long max,
-+					u64 time)
++					unsigned long util, unsigned long max)
 +{
 +	struct cpufreq_policy *policy = sg_policy->policy;
-+	unsigned int freq;
++	unsigned int freq, cap_pct;
 +	unsigned long next_freq = 0;
++
++	/*
++	 * The ceiling follows the utilization continuously: compute it from
++	 * the plain utilization, before it is scaled for the frequency
++	 * mapping below.
++	 */
++	cap_pct = smart_cap_pct(sg_policy->tunables, util, max);
 +
 +	freq = smart_capacity_ref_freq(policy);
 +	util = map_util_perf(util);
@@ -666,22 +604,33 @@ new file mode 100644
 +
 +	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update) {
 +		/*
-+		 * The raw frequency did not change, but the load mode (and
-+		 * hence the cap) may have changed: re-apply the cap on the
-+		 * raw frequency, so that the ramp logic can still move the
++		 * The raw frequency did not change, but the utilization (and
++		 * hence the ceiling) may have changed: re-apply the cap on
++		 * the raw frequency, so that the ramp logic can still move the
 +		 * committed frequency towards the new target.
 +		 */
-+		freq = smart_cap_freq(sg_policy, freq, time);
++		freq = smart_cap_freq(sg_policy, freq, cap_pct);
 +		return cpufreq_driver_resolve_freq(policy, freq);
 +	}
 +
 +	sg_policy->cached_raw_freq = freq;
 +
-+	/* Smartutil: cap the frequency for the current load mode. */
-+	freq = smart_cap_freq(sg_policy, freq, time);
++	/* Smartutil: cap the frequency for the current utilization. */
++	freq = smart_cap_freq(sg_policy, freq, cap_pct);
 +
 +	return cpufreq_driver_resolve_freq(policy, freq);
 +}
++
++/*
++ * effective_cpu_util() wants an enum cpu_util_type value.  FREQUENCY_UTIL is
++ * the member the original schedutil passes, and the first one of that enum, so
++ * its value is 0.  The enumerator itself is declared in kernel/sched/sched.h
++ * under CONFIG_SMP; cpufreq_schedutil.c reaches it because build_utility.c
++ * includes "sched.h" before #including the governor, whereas this file is a
++ * standalone translation unit and not every 6.6 tree exposes the enumerator
++ * to one.  Pass the value so the governor builds on every layout.
++ */
++#define SMART_FREQUENCY_UTIL	0
 +
 +static void smart_get_util(struct smart_cpu *sg_cpu)
 +{
@@ -690,7 +639,7 @@ new file mode 100644
 +
 +	sg_cpu->bw_dl = cpu_bw_dl(rq);
 +	sg_cpu->util = effective_cpu_util(sg_cpu->cpu, util,
-+					  FREQUENCY_UTIL, NULL);
++					  SMART_FREQUENCY_UTIL, NULL);
 +}
 +
 +/**
@@ -773,9 +722,10 @@ new file mode 100644
 + * This mechanism is designed to boost high frequently IO waiting tasks, while
 + * being more conservative on tasks which does sporadic IO operations.
 + *
-+ * Smartutil: this is deliberately called *after* the load mode has been
-+ * picked, so that the boosted utilization only ever influences the requested
-+ * frequency and never the IDLE/NORMAL/HEAVY decision.
++ * Smartutil: the boost is applied to the utilization that drives the
++ * frequency, and the frequency is then limited by both the ceiling and the
++ * ramp, so a burst of IO wakeups cannot push the CPU to the top of its
++ * range on its own.
 + */
 +static void smart_iowait_apply(struct smart_cpu *sg_cpu, u64 time,
 +			       unsigned long max_cap)
@@ -832,7 +782,6 @@ new file mode 100644
 +
 +static inline bool smart_update_single_common(struct smart_cpu *sg_cpu,
 +					      u64 time, unsigned long max_cap,
-+					      unsigned int nr_running,
 +					      unsigned int flags)
 +{
 +	smart_iowait_boost(sg_cpu, time, flags);
@@ -841,14 +790,6 @@ new file mode 100644
 +	if (!smart_should_update_freq(sg_cpu->sg_policy, time))
 +		return false;
 +	smart_get_util(sg_cpu);
-+	/*
-+	 * Pick the load mode here, while sg_cpu->util still holds the plain
-+	 * scheduler utilization.  The IO wait boost is applied afterwards, so
-+	 * a burst of IO wakeups can never masquerade as a heavy CPU load and
-+	 * drag the governor into the (ramp limited) HEAVY mode.
-+	 */
-+	smart_pick_mode(sg_cpu->sg_policy, sg_cpu->util, max_cap,
-+			nr_running, time);
 +	smart_iowait_apply(sg_cpu, time, max_cap);
 +	return true;
 +}
@@ -860,14 +801,13 @@ new file mode 100644
 +	struct smart_policy *sg_policy = sg_cpu->sg_policy;
 +	unsigned int cached_freq = sg_policy->cached_raw_freq;
 +	unsigned long max_cap;
-+	unsigned int nr_running, next_f;
++	unsigned int next_f;
 +
 +	max_cap = arch_scale_cpu_capacity(sg_cpu->cpu);
-+	nr_running = cpu_rq(sg_cpu->cpu)->nr_running;
-+	if (!smart_update_single_common(sg_cpu, time, max_cap, nr_running, flags))
++	if (!smart_update_single_common(sg_cpu, time, max_cap, flags))
 +		return;
 +
-+	next_f = smart_get_next_freq(sg_policy, sg_cpu->util, max_cap, time);
++	next_f = smart_get_next_freq(sg_policy, sg_cpu->util, max_cap);
 +
 +	/*
 +	 * Do not reduce the frequency if the CPU has not been idle
@@ -909,9 +849,8 @@ new file mode 100644
 +	struct smart_cpu *sg_cpu = container_of(hook, struct smart_cpu, update_util);
 +	struct smart_policy *sg_policy = sg_cpu->sg_policy;
 +	unsigned long prev_util = sg_cpu->util;
-+	unsigned long max_cap;
-+	unsigned int nr_running;
-+	unsigned long util;
++	unsigned long max_cap, util;
++	unsigned int cap_pct;
 +
 +	/*
 +	 * Fall back to the "frequency" path if frequency invariance is not
@@ -924,8 +863,7 @@ new file mode 100644
 +	}
 +
 +	max_cap = arch_scale_cpu_capacity(sg_cpu->cpu);
-+	nr_running = cpu_rq(sg_cpu->cpu)->nr_running;
-+	if (!smart_update_single_common(sg_cpu, time, max_cap, nr_running, flags))
++	if (!smart_update_single_common(sg_cpu, time, max_cap, flags))
 +		return;
 +
 +	/*
@@ -939,7 +877,8 @@ new file mode 100644
 +		sg_cpu->util = prev_util;
 +
 +	/* Smartutil: cap and ramp the requested performance level. */
-+	util = smart_cap_perf(sg_policy, sg_cpu->util, max_cap, time);
++	cap_pct = smart_cap_pct(sg_policy->tunables, sg_cpu->util, max_cap);
++	util = smart_cap_perf(sg_cpu->util, max_cap, cap_pct);
 +	util = smart_ramp_perf(sg_cpu, util, max_cap, time);
 +
 +	cpufreq_driver_adjust_perf(sg_cpu->cpu, map_util_perf(sg_cpu->bw_dl),
@@ -951,8 +890,7 @@ new file mode 100644
 +{
 +	struct smart_policy *sg_policy = sg_cpu->sg_policy;
 +	struct cpufreq_policy *policy = sg_policy->policy;
-+	unsigned long util = 0, raw_util = 0, max_cap;
-+	unsigned int nr_running = 0;
++	unsigned long util = 0, max_cap;
 +	unsigned int j;
 +
 +	max_cap = arch_scale_cpu_capacity(sg_cpu->cpu);
@@ -960,21 +898,11 @@ new file mode 100644
 +		struct smart_cpu *j_sg_cpu = &per_cpu(smart_cpu, j);
 +
 +		smart_get_util(j_sg_cpu);
-+		/*
-+		 * Snapshot the plain utilization before the IO wait boost is
-+		 * applied: the mode must reflect the real CPU load, not a
-+		 * burst of IO wakeups.  The boosted utilization is what
-+		 * drives the resulting frequency.
-+		 */
-+		raw_util = max(j_sg_cpu->util, raw_util);
 +		smart_iowait_apply(j_sg_cpu, time, max_cap);
 +		util = max(j_sg_cpu->util, util);
-+		nr_running = max(nr_running, READ_ONCE(cpu_rq(j)->nr_running));
 +	}
 +
-+	smart_pick_mode(sg_policy, raw_util, max_cap, nr_running, time);
-+
-+	return smart_get_next_freq(sg_policy, util, max_cap, time);
++	return smart_get_next_freq(sg_policy, util, max_cap);
 +}
 +
 +static void
@@ -1098,12 +1026,8 @@ new file mode 100644
 +smart_tunable_uint_rw(idle_freq_cap_pct, 0, 100);
 +smart_tunable_uint_rw(heavy_util_thresh, 0, 100);
 +smart_tunable_uint_rw(heavy_freq_cap_pct, 0, 100);
-+smart_tunable_uint_rw(heavy_sustain_cap_pct, 0, 100);
-+smart_tunable_uint_rw(sustain_after_us, 0, 60000000);
-+smart_tunable_uint_rw(heavy_nr_running, 1, 64);
 +smart_tunable_uint_rw(ramp_up_step_pct, 0, 100);
 +smart_tunable_uint_rw(ramp_down_step_pct, 0, 100);
-+smart_tunable_uint_rw(mode_hysteresis, 0, 50);
 +
 +static ssize_t smart_enabled_show(struct gov_attr_set *attr_set, char *buf)
 +{
@@ -1133,12 +1057,8 @@ new file mode 100644
 +	&idle_freq_cap_pct.attr,
 +	&heavy_util_thresh.attr,
 +	&heavy_freq_cap_pct.attr,
-+	&heavy_sustain_cap_pct.attr,
-+	&sustain_after_us.attr,
-+	&heavy_nr_running.attr,
 +	&ramp_up_step_pct.attr,
 +	&ramp_down_step_pct.attr,
-+	&mode_hysteresis.attr,
 +	NULL
 +};
 +
@@ -1194,7 +1114,6 @@ new file mode 100644
 +		return NULL;
 +
 +	sg_policy->policy = policy;
-+	sg_policy->mode = SMART_MODE_NORMAL;
 +	raw_spin_lock_init(&sg_policy->update_lock);
 +	return sg_policy;
 +}
@@ -1330,12 +1249,8 @@ new file mode 100644
 +	tunables->idle_freq_cap_pct = 40;
 +	tunables->heavy_util_thresh = 70;
 +	tunables->heavy_freq_cap_pct = 95;
-+	tunables->heavy_sustain_cap_pct = 80;
-+	tunables->sustain_after_us = 3000000;
-+	tunables->heavy_nr_running = 2;
 +	tunables->ramp_up_step_pct = 10;
 +	tunables->ramp_down_step_pct = 15;
-+	tunables->mode_hysteresis = 10;
 +
 +	policy->governor_data = sg_policy;
 +	sg_policy->tunables = tunables;
@@ -1402,8 +1317,6 @@ new file mode 100644
 +	sg_policy->work_in_progress	= false;
 +	sg_policy->limits_changed	= false;
 +	sg_policy->cached_raw_freq	= 0;
-+	sg_policy->mode			= SMART_MODE_NORMAL;
-+	sg_policy->heavy_since		= 0;
 +	sg_policy->need_freq_update = cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS);
 +
 +	for_each_cpu(cpu, policy->cpus) {
