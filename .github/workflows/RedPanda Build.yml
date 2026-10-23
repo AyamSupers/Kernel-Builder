@@ -213,7 +213,17 @@ jobs:
           KSU_TAG="$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)"
           echo "KSU_TAG=${KSU_TAG}" >> $GITHUB_ENV
           echo "✅ KSU tag: ${KSU_TAG}"
-    
+
+      - name: Enable New Sched
+        if: inputs.sched
+        working-directory: kernel_workspace
+        run: |
+          patch -p1 < $GITHUB_WORKSPACE/patches/0001-linux6.6-Smartutil-v0.1.0.patch
+          cat >> arch/arm64/configs/$KERNEL_DEFCONFIG << 'EOF'
+          CONFIG_CPU_FREQ_GOV_SMARTUTIL=y
+          EOF
+          echo "✅ New Scheduler"
+          
       - name: 🔧 Setup Patches (SUSFS)
         working-directory: kernel_workspace
         run: |
