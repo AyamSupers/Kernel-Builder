@@ -1,61 +1,62 @@
-From 633755b5911034027003f273a80fd0c600a67412 Mon Sep 17 00:00:00 2001
-From: dev <dev@local>
-Date: Fri, 23 Oct 2026 00:35:09 +0700
-Subject: [PATCH] sched/smartutil: Add the Smartutil cpufreq governor
+From f7494fd7fcb15a20e71abe6d017306c4869ce4cc Mon Sep 17 00:00:00 2001
+From: artecxyz <artecxyz404@gmail.com>
+Date: Thu, 22 Oct 2026 14:24:49 +0700
+Subject: [PATCH] cpufreq: Add smartutil governor (standalone schedutil clone)
 
-Smartutil v0.1.0 - thermal friendly cpufreq governor for GKI AOSP
-(Android 15, 6.6 LTS), derived from schedutil.
+smartutil is a fresh standalone governor based on the upstream 6.6
+schedutil, renamed into its own namespace and given its own tunables so
+that both governors can be built at the same time and selected
+independently via scaling_governor.
 
-Smartutil is a thermal friendly cpufreq governor derived from schedutil.
-It consumes the same scheduler utilization data, but adds two things, and
-neither of them is a "mode" - both are plain continuous functions of the
-utilization, in the spirit of the other schedutil derivatives.
+The governor framework is taken from upstream as-is. Three things are
+deliberately different from schedutil:
 
-  1. A frequency ceiling that follows the utilization.  The raw schedutil
-     frequency is capped at a percentage of policy->max that is
-     interpolated between idle_freq_cap_pct (at or below
-     idle_util_thresh) and heavy_freq_cap_pct (at or above
-     heavy_util_thresh).  Light load is therefore held well below the top
-     of the range, heavy load still gets the frequency it asks for, and
-     there is no threshold to cross and no per-policy state to keep.
+  - No fixed 25% headroom. Utilization is mapped strictly proportionally
+    and a load-tiered adjustment is applied on top, so an idle CPU is
+    driven towards policy->min while a loaded one gets only the headroom
+    it actually needs.
+  - No "must have been idle" guard before reducing frequency. Waiting
+    for an idle call before dropping the frequency keeps lightly loaded
+    but never-idling CPUs pinned high, which is the opposite of the
+    goal.
+  - Separate up/down rate limits, so ramps down can be throttled without
+    also throttling ramps up.
 
-  2. A ramp limit on every frequency change.  The committed frequency
-     moves towards the target by at most ramp_up_step_pct (rising) or
-     ramp_down_step_pct (falling) of policy->max per 1 ms window, so a
-     game that suddenly wants maximum performance ramps up instead of
-     jumping straight there and the resulting temperature spike stays
-     small.
+The up/down rate limits follow the ANDROID implementation already used
+here: smut_should_update_freq() uses min(up, down) purely as an
+early-out, and the direction-specific limit is applied in
+smut_update_next_freq() once the direction of the transition is known.
+That way neither limit can delay a transition belonging to the other
+direction.
 
-The ramp up step is skipped while an iowait boost is in flight: the CPU is
-only busy because of IO wakeups, so ramping it up would just add latency
-to a task that wants to go back to sleep as soon as possible.  Ramping
-down still applies and the utilization based ceiling is still enforced,
-so the thermal target is not weakened by this.
+Each load tier also has an optional frequency ceiling expressed as a
+percentage of the policy maximum, which keeps a busy CPU from being
+pinned at max and is the main heat-control knob.
 
-The governor can also be made the default one with
-CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL, which is added to the "Default
-CPUFreq governor" choice.  For that to work cpufreq_schedutil.c learns
-how to return smartutil_gov from cpufreq_default_governor(), which is
-why the governor structure is a global symbol instead of a static one.
-Note that selecting it as the default still requires the matching
-defconfig line, the patch itself does not enable it.
+Tunables, exposed per policy under
+/sys/devices/system/cpu/cpufreq/policy*/smartutil/:
 
-All of the behaviour is tunable at runtime through sysfs, so no
-defconfig change is needed: the Kconfig entry is "default y" and the
-governor is selected at runtime with
+  up_rate_limit_us, down_rate_limit_us
+  target_load1, target_load2
+  boost_light_pct, cut_heavy_pct
+  cap_light_pct, cap_mid_pct, cap_heavy_pct
 
-  echo smartutil > /sys/devices/system/cpu/cpufreq/policy*/scaling_governor
+The governor is not enabled by any defconfig; set
+CONFIG_CPU_FREQ_GOV_SMARTUTIL=y (or m) where it is wanted.
+
+Signed-off-by: artecxyz <artecxyz404@gmail.com>
 ---
- drivers/cpufreq/Kconfig          |   34 ++++++++++++++++++++++++++++++++++
- kernel/sched/Makefile            |    1 +
- kernel/sched/cpufreq_schedutil.c |   13 +++++++++++++
- kernel/sched/smartutil.c         | 1235 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
- 4 files changed, 1283 insertions(+)
+ drivers/cpufreq/Kconfig          |   32 +
+ kernel/sched/build_utility.c     |    4 +
+ kernel/sched/cpufreq_smartutil.c | 1082 ++++++++++++++++++++++++++++++
+ 3 files changed, 1118 insertions(+)
+ create mode 100644 kernel/sched/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
+index a1b82168a942..a656caf67d43 100644
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -112,6 +112,21 @@ config CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
+@@ -112,6 +112,17 @@ config CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
  	  have a look at the help section of that governor. The fallback
  	  governor will be 'performance'.
  
@@ -65,19 +66,15 @@ diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 +	select CPU_FREQ_GOV_SMARTUTIL
 +	select CPU_FREQ_GOV_PERFORMANCE
 +	help
-+	  Use the 'smartutil' CPUFreq governor by default. If unsure,
++	  Use the 'smartutil' CPUFreq governor by default. This governor is a
++	  standalone variant of 'schedutil' with its own tunables. If unsure,
 +	  have a look at the help section of that governor. The fallback
 +	  governor will be 'performance'.
-+
-+	  smartutil is a thermal friendly schedutil variant: it keeps the
-+	  frequency low and capped while the system is idle, and ramps it up
-+	  gradually instead of jumping straight to the maximum when the load
-+	  increases, so the device stays cooler.
 +
  endchoice
  
  config CPU_FREQ_GOV_PERFORMANCE
-@@ -210,6 +210,25 @@ config CPU_FREQ_GOV_SCHEDUTIL
+@@ -210,6 +221,27 @@ config CPU_FREQ_GOV_SCHEDUTIL
  
  	  If in doubt, say N.
  
@@ -86,180 +83,120 @@ diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
 +	depends on CPU_FREQ && SMP
 +	select CPU_FREQ_GOV_ATTR_SET
 +	select IRQ_WORK
-+	default y
 +	help
-+	  This governor is a thermal friendly variant of 'schedutil'.  It uses
-+	  the same scheduler utilization data, but it keeps the CPU frequency
-+	  low and hard capped well below the maximum while the system is idle,
-+	  and it ramps the frequency up gradually instead of jumping straight
-+	  to the maximum when the load increases (games, benchmarks, ...), so
-+	  the device stays cooler.
++	  This governor makes decisions based on the utilization data provided
++	  by the scheduler.  It sets the CPU frequency to be proportional to
++	  the utilization/capacity ratio coming from the scheduler.  If the
++	  utilization is frequency-invariant, the new frequency is also
++	  proportional to the maximum available frequency.  If that is not the
++	  case, it is proportional to the current frequency of the CPU.  The
++	  frequency tipping point is at utilization/capacity equal to 80% in
++	  both cases.
 +
-+	  All of its behaviour (caps, thresholds, ramp rate) is configurable at
-+	  runtime through the tunables it exposes in sysfs.
++	  This is a standalone variant of 'schedutil' that registers under its
++	  own name and owns its own tunables, so both governors can be built in
++	  at the same time and selected independently at runtime.
 +
-+	  If in doubt, say Y.
++	  If in doubt, say N.
 +
  comment "CPU frequency scaling drivers"
  
  config CPUFREQ_DT
-diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
---- a/kernel/sched/Makefile
-+++ b/kernel/sched/Makefile
-@@ -33,3 +33,4 @@ obj-y += fair.o
- obj-y += build_policy.o
- obj-y += build_utility.o
- obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o
-+obj-$(CONFIG_CPU_FREQ_GOV_SMARTUTIL) += smartutil.o
-diff --git a/kernel/sched/cpufreq_schedutil.c b/kernel/sched/cpufreq_schedutil.c
---- a/kernel/sched/cpufreq_schedutil.c
-+++ b/kernel/sched/cpufreq_schedutil.c
-@@ -883,5 +883,18 @@ struct cpufreq_governor *cpufreq_default_governor(void)
- 	return &schedutil_gov;
- }
+diff --git a/kernel/sched/build_utility.c b/kernel/sched/build_utility.c
+index d6679d7352eb..7633dda77b20 100644
+--- a/kernel/sched/build_utility.c
++++ b/kernel/sched/build_utility.c
+@@ -73,6 +73,10 @@
+ # include "cpufreq_schedutil.c"
  #endif
-+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL
-+/*
-+ * smartutil lives in its own translation unit (kernel/sched/smartutil.c),
-+ * so its governor structure has to be a global symbol to be usable as the
-+ * default governor from here.
-+ */
-+extern struct cpufreq_governor smartutil_gov;
-+
-+struct cpufreq_governor *cpufreq_default_governor(void)
-+{
-+	return &smartutil_gov;
-+}
-+#endif
  
- cpufreq_governor_init(schedutil_gov);
-diff --git a/kernel/sched/smartutil.c b/kernel/sched/smartutil.c
++#ifdef CONFIG_CPU_FREQ_GOV_SMARTUTIL
++# include "cpufreq_smartutil.c"
++#endif
++
+ #ifdef CONFIG_SCHED_DEBUG
+ # include "debug.c"
+ #endif
+diff --git a/kernel/sched/cpufreq_smartutil.c b/kernel/sched/cpufreq_smartutil.c
 new file mode 100644
+index 000000000000..a29c4d99e401
 --- /dev/null
-+++ b/kernel/sched/smartutil.c
-@@ -0,0 +1,1235 @@
++++ b/kernel/sched/cpufreq_smartutil.c
+@@ -0,0 +1,1082 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
-+ * Smartutil - smart, thermal friendly cpufreq governor.
++ * Smartutil CPUFreq governor (based on schedutil)
 + *
-+ * Derived from the scheduler utilization based governor (schedutil,
-+ * kernel/sched/cpufreq_schedutil.c): the whole scheduling interface
-+ * (utilization sampling, iowait boost, rate limiting, kthread and fast
-+ * switch handling) is unchanged.  Smartutil adds two things on top, and
-+ * neither of them is a "mode" - both are plain continuous functions of the
-+ * utilization, in the spirit of the other schedutil derivatives.
++ * This is a standalone governor derived from 'schedutil'. It keeps the exact
++ * same framework as schedutil, but registers under its own name and owns its
++ * own set of tunables, so it can be tuned (or replaced) independently without
++ * affecting the stock 'schedutil' governor.
 + *
-+ * 1. A frequency ceiling that follows the utilization
-+ *
-+ *    The raw schedutil frequency is capped at a percentage of policy->max
-+ *    that is interpolated between two points, so there is no threshold to
-+ *    cross and no state machine:
-+ *
-+ *      cap%  heavy_cap ┤                      ╱──────
-+ *                     │                  ╱
-+ *                     │              ╱
-+ *      idle_cap  ┤──╱
-+ *                     └──────────┬──────────────┬───── util%
-+ *                             idle_util     heavy_util
-+ *
-+ *    Light load never gets past "idle_freq_cap_pct" and heavy load never
-+ *    gets past "heavy_freq_cap_pct", so the CPU is never driven to the very
-+ *    top of its range on demand alone and the device does not heat up.
-+ *    Between the two points the cap tracks the utilization, so a heavy task
-+ *    still gets the frequency it asks for.
-+ *
-+ * 2. A ramp limit on every frequency change
-+ *
-+ *    The committed frequency moves towards the target by at most
-+ *    "ramp_up_step_pct" (rising) or "ramp_down_step_pct" (falling) of
-+ *    policy->max per 1 ms window.  A game that suddenly wants maximum
-+ *    performance therefore ramps up instead of jumping straight there,
-+ *    which keeps the temperature spike down, while a burst of IO wakeups
-+ *    still gets its frequency immediately (ramping up is skipped while an
-+ *    iowait boost is in flight).
-+ *
-+ * Everything is a percentage and can be tuned at runtime, e.g.
-+ *
-+ *   /sys/devices/system/cpu/cpufreq/policy0/smartutil/idle_freq_cap_pct
-+ *
-+ * Tunables (all per-policy, under .../cpufreq/policyN/smartutil/):
-+ *
-+ *   smart_enabled        master on/off switch (0 disables all Smartutil logic
-+ *                        and the governor then behaves exactly like schedutil)
-+ *   idle_util_thresh     utilization (in % of capacity) below which the
-+ *                        ceiling is pinned to "idle_freq_cap_pct"
-+ *   idle_freq_cap_pct    ceiling at or below "idle_util_thresh" (% of max)
-+ *   heavy_util_thresh    utilization above which the ceiling is pinned to
-+ *                        "heavy_freq_cap_pct"
-+ *   heavy_freq_cap_pct   ceiling at or above "heavy_util_thresh" (% of max)
-+ *   ramp_up_step_pct     max frequency increase per ramp window (1 ms), in %
-+ *   ramp_down_step_pct   max frequency decrease per ramp window (1 ms), in %
-+ *   rate_limit_us        minimum time between two frequency updates
++ * Copyright (C) 2026 Artecxyz
++ * Copyright (C) 2016, Intel Corporation
++ * Author: Rafael J. Wysocki <rafael.j.wysocki@intel.com>
 + */
-+#include <linux/cpufreq.h>
-+#include <linux/cpumask.h>
-+#include <linux/err.h>
-+#include <linux/irq_work.h>
-+#include <linux/jiffies.h>
-+#include <linux/kobject.h>
-+#include <linux/kstrtox.h>
-+#include <linux/kthread.h>
-+#include <linux/list.h>
-+#include <linux/math.h>
-+#include <linux/module.h>
-+#include <linux/mutex.h>
-+#include <linux/percpu.h>
-+#include <linux/printk.h>
-+#include <linux/rcupdate.h>
-+#include <linux/sched/cpufreq.h>
-+#include <linux/slab.h>
-+#include <linux/spinlock.h>
-+#include <linux/sysfs.h>
++
 +#include <trace/hooks/sched.h>
-+/*
-+ * struct sched_attr is only forward declared in <linux/sched.h>.  The
-+ * original cpufreq_schedutil.c never asks for it because it is #included by
-+ * build_utility.c, which pulls in <uapi/linux/sched/types.h> first; this file
-+ * is a standalone translation unit and has to do so itself.
-+ */
-+#include <uapi/linux/sched/types.h>
 +
-+#include "sched.h"
++#define CPUFREQ_SMARTUTIL_PROGNAME "Smartutil CPUFreq Governor"
++#define CPUFREQ_SMARTUTIL_AUTHOR   "Artecxyz"
 +
-+#define SMART_IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 8)
++#define SMUT_IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 8)
 +
-+/*
-+ * A ramp step (in % of the frequency/performance range) is allowed once per
-+ * SMART_RAMP_WINDOW_US of elapsed time.  The multiplier is capped so that a
-+ * long gap between two updates does not cause an instant jump to the maximum.
-+ */
-+#define SMART_RAMP_WINDOW_US		1000
-+#define SMART_RAMP_WINDOW_MAX		4
-+#define SMART_RAMP_WINDOW_NS		(SMART_RAMP_WINDOW_US * NSEC_PER_USEC)
-+#define SMART_RAMP_WINDOW_CAP_NS	(SMART_RAMP_WINDOW_MAX * SMART_RAMP_WINDOW_NS)
-+
-+struct smart_tunables {
++struct smut_tunables {
 +	struct gov_attr_set	attr_set;
-+	unsigned int		rate_limit_us;
 +
-+	bool			smart_enabled;
-+	unsigned int		idle_util_thresh;
-+	unsigned int		idle_freq_cap_pct;
-+	unsigned int		heavy_util_thresh;
-+	unsigned int		heavy_freq_cap_pct;
-+	unsigned int		ramp_up_step_pct;
-+	unsigned int		ramp_down_step_pct;
++	/*
++	 * Rate limits, in microseconds. Unlike schedutil, smartutil keeps
++	 * separate limits for the two directions, so an idle CPU can fall
++	 * back to policy->min quickly without also letting the frequency
++	 * ramp up just as eagerly.
++	 */
++	unsigned int		up_rate_limit_us;
++	unsigned int		down_rate_limit_us;
++
++	/*
++	 * Load tiers, in percent of CPU capacity. util/max below
++	 * target_load1 is "light", between the two is "medium", above
++	 * target_load2 is "heavy".
++	 */
++	unsigned int		target_load1;
++	unsigned int		target_load2;
++
++	/*
++	 * Headroom / trim, in percent, applied on top of the strictly
++	 * proportional base mapping. Light load gets a little headroom so
++	 * the governor stays reactive; heavy load is trimmed so a game is
++	 * answered without parking the CPU at max.
++	 */
++	unsigned int		boost_light_pct;
++	unsigned int		cut_heavy_pct;
++
++	/*
++	 * Per-tier frequency ceiling, in percent of policy->cpuinfo.max_freq.
++	 * 100 disables the cap for that tier. Lowering cap_heavy_pct on the
++	 * prime policy is the strongest single heat-control knob.
++	 */
++	unsigned int		cap_light_pct;
++	unsigned int		cap_mid_pct;
++	unsigned int		cap_heavy_pct;
 +};
 +
-+struct smart_policy {
++struct smut_policy {
 +	struct cpufreq_policy	*policy;
-+	struct smart_tunables	*tunables;
++
++	struct smut_tunables	*tunables;
 +	struct list_head	tunables_hook;
++
 +	raw_spinlock_t		update_lock;
 +	u64			last_freq_update_time;
-+	s64			freq_update_delay_ns;
++	s64			min_rate_limit_ns;
++	s64			up_rate_delay_ns;
++	s64			down_rate_delay_ns;
 +	unsigned int		next_freq;
 +	unsigned int		cached_raw_freq;
++
 +	/* The next fields are only needed if fast switch cannot be used: */
 +	struct			irq_work irq_work;
 +	struct			kthread_work work;
@@ -267,42 +204,73 @@ new file mode 100644
 +	struct			kthread_worker worker;
 +	struct task_struct	*thread;
 +	bool			work_in_progress;
++
 +	bool			limits_changed;
 +	bool			need_freq_update;
 +};
 +
-+struct smart_cpu {
++struct smut_cpu {
 +	struct update_util_data	update_util;
-+	struct smart_policy	*sg_policy;
++	struct smut_policy	*sg_policy;
 +	unsigned int		cpu;
++
 +	bool			iowait_boost_pending;
 +	unsigned int		iowait_boost;
 +	u64			last_update;
++
 +	unsigned long		util;
 +	unsigned long		bw_dl;
-+	/* Last performance level requested by the ramp logic (perf path). */
-+	unsigned long		ramp_perf;
-+	/* The field below is for single-CPU policies only: */
-+#ifdef CONFIG_NO_HZ_COMMON
-+	unsigned long		saved_idle_calls;
-+#endif
 +};
 +
-+static DEFINE_PER_CPU(struct smart_cpu, smart_cpu);
++static DEFINE_PER_CPU(struct smut_cpu, smut_cpu);
++
++/*
++ * Protects min_rate_limit_ns across all policies sharing one tunables set,
++ * since two rate limits can be written concurrently.
++ */
++static DEFINE_MUTEX(smut_min_rate_lock);
 +
 +/************************ Governor internals ***********************/
 +
-+static bool smart_should_update_freq(struct smart_policy *sg_policy, u64 time)
++static void smut_update_min_rate_limit_ns(struct smut_policy *sg_policy)
 +{
-+	s64 delta_ns;
++	mutex_lock(&smut_min_rate_lock);
++	sg_policy->min_rate_limit_ns =
++		min(sg_policy->up_rate_delay_ns, sg_policy->down_rate_delay_ns);
++	mutex_unlock(&smut_min_rate_lock);
++}
 +
++static bool smut_up_down_rate_limit(struct smut_policy *sg_policy, u64 time,
++				    unsigned int next_freq)
++{
++	s64 delta_ns = time - sg_policy->last_freq_update_time;
++
++	/*
++	 * If the frequency is being raised, the up rate limit applies; if it
++	 * is being lowered, the down rate limit does. A transition is only
++	 * throttled by the limit of the direction it is actually moving in,
++	 * so the two knobs can never block each other.
++	 */
++	if (next_freq > sg_policy->next_freq &&
++	    delta_ns < sg_policy->up_rate_delay_ns)
++		return true;
++
++	if (next_freq < sg_policy->next_freq &&
++	    delta_ns < sg_policy->down_rate_delay_ns)
++		return true;
++
++	return false;
++}
++
++static bool smut_should_update_freq(struct smut_policy *sg_policy, u64 time)
++{
 +	/*
 +	 * Since cpufreq_update_util() is called with rq->lock held for
 +	 * the @target_cpu, our per-CPU data is fully serialized.
 +	 *
 +	 * However, drivers cannot in general deal with cross-CPU
-+	 * requests, so while smart_get_next_freq() will work, our
-+	 * smart_update_commit() call may not for the fast switching platforms.
++	 * requests, so while smut_next_freq() will work, our
++	 * smut_update_commit() call may not for the fast switching platforms.
 +	 *
 +	 * Hence stop here for remote requests if they aren't supported
 +	 * by the hardware, as calculating the frequency is pointless if
@@ -320,11 +288,16 @@ new file mode 100644
 +		return true;
 +	}
 +
-+	delta_ns = time - sg_policy->last_freq_update_time;
-+	return delta_ns >= sg_policy->freq_update_delay_ns;
++	/*
++	 * Nothing to gain from recalculating next freq again before
++	 * min_rate_limit_ns has elapsed. The direction-specific limits are
++	 * applied later, once the direction is known.
++	 */
++	return time - sg_policy->last_freq_update_time >=
++		sg_policy->min_rate_limit_ns;
 +}
 +
-+static bool smart_update_next_freq(struct smart_policy *sg_policy, u64 time,
++static bool smut_update_next_freq(struct smut_policy *sg_policy, u64 time,
 +				   unsigned int next_freq)
 +{
 +	if (sg_policy->need_freq_update) {
@@ -343,12 +316,21 @@ new file mode 100644
 +	} else if (sg_policy->next_freq == next_freq) {
 +		return false;
 +	}
++
++	/*
++	 * Now that the direction of the transition is known, apply the rate
++	 * limit for that direction only.
++	 */
++	if (smut_up_down_rate_limit(sg_policy, time, next_freq))
++		return false;
++
 +	sg_policy->next_freq = next_freq;
 +	sg_policy->last_freq_update_time = time;
++
 +	return true;
 +}
 +
-+static void smart_deferred_update(struct smart_policy *sg_policy)
++static void smut_deferred_update(struct smut_policy *sg_policy)
 +{
 +	if (!sg_policy->work_in_progress) {
 +		sg_policy->work_in_progress = true;
@@ -357,7 +339,7 @@ new file mode 100644
 +}
 +
 +/**
-+ * smart_capacity_ref_freq - get the reference frequency that has been used to
++ * smut_capacity_ref_freq - get the reference frequency that has been used to
 + * correlate frequency and compute capacity for a given cpufreq policy. We use
 + * the CPU managing it for the arch_scale_freq_ref() call in the function.
 + * @policy: the cpufreq policy of the CPU in question.
@@ -365,468 +347,301 @@ new file mode 100644
 + * Return: the reference CPU frequency to compute a capacity.
 + */
 +static __always_inline
-+unsigned long smart_capacity_ref_freq(struct cpufreq_policy *policy)
++unsigned long smut_capacity_ref_freq(struct cpufreq_policy *policy)
 +{
 +	unsigned int freq = arch_scale_freq_ref(policy->cpu);
++
 +	if (freq)
 +		return freq;
++
 +	if (arch_scale_freq_invariant())
 +		return policy->cpuinfo.max_freq;
++
 +	/*
 +	 * Apply a 25% margin so that we select a higher frequency than
 +	 * the current one before the CPU is fully busy:
 +	 */
 +	return policy->cur + (policy->cur >> 2);
 +}
-+/*
-+ * smart_cap_pct - frequency ceiling, in percent of the frequency range, for
-+ * the given utilization.
-+ *
-+ * @util is the CPU utilization in capacity scale (i.e. relative to @max) and
-+ * is reduced to a percentage here.
-+ *
-+ * The result is a continuous, piecewise linear function of the utilization:
-+ *
-+ *      cap%  heavy_cap ┤                      /------
-+ *                     |                  /
-+ *                     |              /
-+ *      idle_cap  ----/
-+ *                     +----------|--------------|----- util%
-+ *                             idle_util     heavy_util
-+ *
-+ * so light load is held well below the top of the range, heavy load still
-+ * gets the frequency it asks for, and there is no threshold to cross and
-+ * nothing to keep state of.  A return value of 100 means "no ceiling".
-+ */
-+static unsigned int smart_cap_pct(struct smart_tunables *tunables,
-+				  unsigned long util, unsigned long max)
-+{
-+	unsigned int lo, hi, util_pct;
-+
-+	if (!tunables->smart_enabled || unlikely(!max))
-+		return 100;
-+
-+	util_pct = (unsigned int)((util * 100) / max);
-+	if (util_pct > 100)
-+		util_pct = 100;
-+
-+	lo = tunables->idle_util_thresh;
-+	hi = tunables->heavy_util_thresh;
-+
-+	if (util_pct <= lo)
-+		return tunables->idle_freq_cap_pct;
-+	if (util_pct >= hi)
-+		return tunables->heavy_freq_cap_pct;
-+
-+	/* Guard against a misconfigured pair of thresholds. */
-+	if (hi <= lo)
-+		return tunables->idle_freq_cap_pct;
-+
-+	return tunables->idle_freq_cap_pct +
-+		(unsigned int)(((unsigned long)(tunables->heavy_freq_cap_pct -
-+						tunables->idle_freq_cap_pct) *
-+				(util_pct - lo)) / (hi - lo));
-+}
-+
-+/* Cap a raw frequency (kHz) at the given percentage of policy->max. */
-+static unsigned int smart_cap_freq(struct smart_policy *sg_policy,
-+				   unsigned int freq, unsigned int pct)
-+{
-+	unsigned int cap;
-+
-+	if (pct >= 100)
-+		return freq;
-+
-+	cap = mult_frac(sg_policy->policy->max, pct, 100);
-+	if (freq > cap)
-+		freq = cap;
-+
-+	return freq;
-+}
-+
-+/*
-+ * Cap a performance level (capacity scale) at the given percentage of the
-+ * CPU capacity.  The perf path asks for a capacity, not a frequency, so the
-+ * same ceiling is expressed in the same scale as @util.
-+ */
-+static unsigned long smart_cap_perf(unsigned long util, unsigned long max,
-+				    unsigned int pct)
-+{
-+	unsigned long cap;
-+
-+	if (pct >= 100)
-+		return util;
-+
-+	cap = mult_frac(max, pct, 100);
-+	if (util > cap)
-+		util = cap;
-+
-+	return util;
-+}
-+
-+/*
-+ * Ramp step: the given percentage of @base is allowed per
-+ * SMART_RAMP_WINDOW_US of elapsed time, capped at SMART_RAMP_WINDOW_MAX
-+ * windows, so the ramp rate stays roughly constant no matter how often (or
-+ * how rarely) the governor is called.
-+ */
-+static unsigned long smart_ramp_step(unsigned long base, unsigned int pct,
-+				     s64 delta_ns)
-+{
-+	unsigned long step;
-+
-+	if (!pct)
-+		return 0;
-+
-+	if (delta_ns < 0)
-+		delta_ns = 0;
-+	if (delta_ns > SMART_RAMP_WINDOW_CAP_NS)
-+		delta_ns = SMART_RAMP_WINDOW_CAP_NS;
-+
-+	step = mult_frac(base, pct, 100);
-+	step = mult_frac(step, delta_ns, SMART_RAMP_WINDOW_NS);
-+
-+	return step;
-+}
-+
-+/* Ramp limit a frequency (kHz) towards the target. */
-+static unsigned int smart_ramp_freq(struct smart_cpu *sg_cpu,
-+				    unsigned int freq, u64 time)
-+{
-+	struct smart_policy *sg_policy = sg_cpu->sg_policy;
-+	struct smart_tunables *tunables = sg_policy->tunables;
-+	unsigned int last = sg_policy->next_freq;
-+	unsigned long step;
-+
-+	if (!tunables->smart_enabled || !last || freq == last)
-+		return freq;
-+
-+	/*
-+	 * Race to idle: while an iowait boost is in flight this CPU is only
-+	 * busy because of IO wakeups, not because of real CPU load.  Let the
-+	 * boost raise the frequency immediately - ramping it up would just
-+	 * add latency to a task that wants to go back to sleep as soon as
-+	 * possible.  Ramping down still applies and the utilization based
-+	 * ceiling is still enforced, so the thermal target is not lost.
-+	 */
-+	if (freq > last && sg_cpu->iowait_boost)
-+		return freq;
-+
-+	if (freq > last) {
-+		step = smart_ramp_step(sg_policy->policy->max,
-+				       tunables->ramp_up_step_pct,
-+				       time - sg_policy->last_freq_update_time);
-+		if (freq - last > step)
-+			freq = last + step;
-+	} else {
-+		step = smart_ramp_step(sg_policy->policy->max,
-+				       tunables->ramp_down_step_pct,
-+				       time - sg_policy->last_freq_update_time);
-+		if (last - freq > step)
-+			freq = last - step;
-+	}
-+
-+	return freq;
-+}
-+
-+/* Ramp limit a performance level (capacity scale) towards the target. */
-+static unsigned long smart_ramp_perf(struct smart_cpu *sg_cpu,
-+				     unsigned long util, unsigned long max,
-+				     u64 time)
-+{
-+	struct smart_policy *sg_policy = sg_cpu->sg_policy;
-+	struct smart_tunables *tunables = sg_policy->tunables;
-+	unsigned long last = sg_cpu->ramp_perf;
-+	unsigned long step;
-+
-+	if (!tunables->smart_enabled)
-+		return util;
-+
-+	/*
-+	 * Race to idle: same rationale as smart_ramp_freq().  The level is
-+	 * recorded even though it is not ramped, so that the ramp state keeps
-+	 * tracking what was actually applied and the next descent starts from
-+	 * here instead of from a stale, lower value.
-+	 */
-+	if (sg_cpu->iowait_boost && util > sg_cpu->ramp_perf) {
-+		sg_cpu->ramp_perf = util;
-+		return util;
-+	}
-+
-+	if (last && util != last) {
-+		if (util > last) {
-+			step = smart_ramp_step(max, tunables->ramp_up_step_pct,
-+					       time - sg_policy->last_freq_update_time);
-+			if (util - last > step)
-+				util = last + step;
-+		} else {
-+			step = smart_ramp_step(max, tunables->ramp_down_step_pct,
-+					       time - sg_policy->last_freq_update_time);
-+			if (last - util > step)
-+				util = last - step;
-+		}
-+	}
-+
-+	sg_cpu->ramp_perf = util;
-+	return util;
-+}
 +
 +/**
-+ * smart_get_next_freq - Compute a new frequency for a given cpufreq policy.
++ * smut_next_freq - Compute a new frequency for a given cpufreq policy.
 + * @sg_policy: smartutil policy object to compute the new frequency for.
 + * @util: Current CPU utilization.
 + * @max: CPU capacity.
 + *
-+ * Same as schedutil, plus the Smartutil utilization based frequency ceiling.
++ * The base mapping is strictly proportional to the utilization, with no
++ * fixed headroom, so a lightly loaded or idle CPU is driven towards
++ * policy->min instead of hovering in the middle of the OPP table:
++ *
++ *	base = ref_freq * util / max
++ *
++ * On top of that, three load tiers decide how much headroom or trim to
++ * apply and whether a frequency ceiling is in force:
++ *
++ *	light  (load <  target_load1): base + boost_light_pct
++ *	medium (target_load1..target_load2): base as-is
++ *	heavy  (load >= target_load2): base - cut_heavy_pct
++ *
++ * Each tier also has a cap expressed as a percentage of
++ * policy->cpuinfo.max_freq, which bounds the result no matter how high the
++ * utilization goes. That cap is the main heat control: a game is answered
++ * with the frequency it actually needs rather than the maximum.
++ *
++ * The lowest driver-supported frequency which is equal or greater than the
++ * raw next_freq (as calculated above) is returned, subject to policy min/max
++ * and cpufreq driver limitations.
 + */
-+static unsigned int smart_get_next_freq(struct smart_policy *sg_policy,
-+					unsigned long util, unsigned long max)
++static unsigned int smut_next_freq(struct smut_policy *sg_policy,
++				   unsigned long util, unsigned long max)
 +{
 +	struct cpufreq_policy *policy = sg_policy->policy;
-+	unsigned int freq, cap_pct;
++	struct smut_tunables *tunables = sg_policy->tunables;
++	unsigned int freq, cap_pct, max_freq;
 +	unsigned long next_freq = 0;
++	unsigned long load = 100 * util / max;
 +
-+	/*
-+	 * The ceiling follows the utilization continuously: compute it from
-+	 * the plain utilization, before it is scaled for the frequency
-+	 * mapping below.
-+	 */
-+	cap_pct = smart_cap_pct(sg_policy->tunables, util, max);
++	freq = smut_capacity_ref_freq(policy);
++	max_freq = policy->cpuinfo.max_freq;
 +
-+	freq = smart_capacity_ref_freq(policy);
-+	util = map_util_perf(util);
 +	trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
-+			&sg_policy->need_freq_update);
-+	if (next_freq)
++				       &sg_policy->need_freq_update);
++	if (next_freq) {
 +		freq = next_freq;
-+	else
++	} else {
 +		freq = map_util_freq(util, freq, max);
 +
-+	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update) {
-+		/*
-+		 * The raw frequency did not change, but the utilization (and
-+		 * hence the ceiling) may have changed: re-apply the cap on
-+		 * the raw frequency, so that the ramp logic can still move the
-+		 * committed frequency towards the new target.
-+		 */
-+		freq = smart_cap_freq(sg_policy, freq, cap_pct);
-+		return cpufreq_driver_resolve_freq(policy, freq);
++		if (load < tunables->target_load1) {
++			/*
++			 * Light load. A little headroom keeps the governor
++			 * reactive (app launch, scrolling) without parking
++			 * the CPU high.
++			 */
++			freq += freq * tunables->boost_light_pct / 100;
++			cap_pct = tunables->cap_light_pct;
++		} else if (load < tunables->target_load2) {
++			/* Medium load: the load alone decides. */
++			cap_pct = tunables->cap_mid_pct;
++		} else {
++			/*
++			 * Heavy load. Trim the target so the CPU answers the
++			 * load without being pinned at max; the last few
++			 * percent of frequency are the most expensive in
++			 * power and heat.
++			 */
++			freq -= freq * tunables->cut_heavy_pct / 100;
++			cap_pct = tunables->cap_heavy_pct;
++		}
++
++		if (cap_pct < 100)
++			freq = min_t(unsigned int, freq, max_freq * cap_pct / 100);
 +	}
 +
++	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
++		return sg_policy->next_freq;
++
 +	sg_policy->cached_raw_freq = freq;
-+
-+	/* Smartutil: cap the frequency for the current utilization. */
-+	freq = smart_cap_freq(sg_policy, freq, cap_pct);
-+
 +	return cpufreq_driver_resolve_freq(policy, freq);
 +}
 +
 +/*
-+ * effective_cpu_util() wants an enum cpu_util_type value.  FREQUENCY_UTIL is
-+ * the member the original schedutil passes, and the first one of that enum, so
-+ * its value is 0.  The enumerator itself is declared in kernel/sched/sched.h
-+ * under CONFIG_SMP; cpufreq_schedutil.c reaches it because build_utility.c
-+ * includes "sched.h" before #including the governor, whereas this file is a
-+ * standalone translation unit and not every 6.6 tree exposes the enumerator
-+ * to one.  Pass the value so the governor builds on every layout.
++ * NOTE: this is the one part of the governor that is tied to the host
++ * kernel's scheduler-util API. Upstream 6.6 exposes
++ * effective_cpu_util(cpu, util, FREQUENCY_UTIL, NULL); this tree instead
++ * exposes effective_cpu_util(cpu, util, &min, &max). The two are
++ * equivalent in effect, only the plumbing differs.
 + */
-+#define SMART_FREQUENCY_UTIL	0
-+
-+static void smart_get_util(struct smart_cpu *sg_cpu)
++static void smut_get_util(struct smut_cpu *sg_cpu)
 +{
-+	unsigned long util = cpu_util_cfs_boost(sg_cpu->cpu);
-+	struct rq *rq = cpu_rq(sg_cpu->cpu);
++	unsigned long min, max, util = cpu_util_cfs_boost(sg_cpu->cpu);
 +
-+	sg_cpu->bw_dl = cpu_bw_dl(rq);
-+	sg_cpu->util = effective_cpu_util(sg_cpu->cpu, util,
-+					  SMART_FREQUENCY_UTIL, NULL);
++	sg_cpu->bw_dl = cpu_bw_dl(cpu_rq(sg_cpu->cpu));
++	util = effective_cpu_util(sg_cpu->cpu, util, &min, &max);
++
++	/*
++	 * Deliberately no map_util_perf() headroom here. schedutil bakes a
++	 * fixed 25% headroom into the utilization, which pins the frequency
++	 * high across the whole light-load range. smartutil applies its own
++	 * load-dependent headroom in smut_next_freq(), so the tipping point is
++	 * fully owned by the tunables instead.
++	 */
++	if (util < max)
++		max = util;
++
++	/*
++	 * Ensure at least minimum performance while providing more compute
++	 * capacity when possible.
++	 */
++	sg_cpu->util = max(min, max);
 +}
 +
 +/**
-+ * smart_iowait_reset() - Reset the IO boost status of a CPU.
++ * smut_iowait_reset() - Reset the IO boost status of a CPU.
 + * @sg_cpu: the smartutil data for the CPU to boost
 + * @time: the update time from the caller
 + * @set_iowait_boost: true if an IO boost has been requested
 + *
 + * The IO wait boost of a task is disabled after a tick since the last update
 + * of a CPU. If a new IO wait boost is requested after more then a tick, then
-+ * we enable the boost starting from SMART_IOWAIT_BOOST_MIN, which improves
-+ * energy efficiency by ignoring sporadic wakeups from IO.
++ * we enable the boost starting from SMUT_IOWAIT_BOOST_MIN, which improves energy
++ * efficiency by ignoring sporadic wakeups from IO.
 + */
-+static bool smart_iowait_reset(struct smart_cpu *sg_cpu, u64 time,
++static bool smut_iowait_reset(struct smut_cpu *sg_cpu, u64 time,
 +			       bool set_iowait_boost)
 +{
 +	s64 delta_ns = time - sg_cpu->last_update;
++
 +	/* Reset boost only if a tick has elapsed since last request */
 +	if (delta_ns <= TICK_NSEC)
 +		return false;
-+	sg_cpu->iowait_boost = set_iowait_boost ? SMART_IOWAIT_BOOST_MIN : 0;
++
++	sg_cpu->iowait_boost = set_iowait_boost ? SMUT_IOWAIT_BOOST_MIN : 0;
 +	sg_cpu->iowait_boost_pending = set_iowait_boost;
++
 +	return true;
 +}
 +
 +/**
-+ * smart_iowait_boost() - Updates the IO boost status of a CPU.
++ * smut_iowait_boost() - Updates the IO boost status of a CPU.
 + * @sg_cpu: the smartutil data for the CPU to boost
 + * @time: the update time from the caller
 + * @flags: SCHED_CPUFREQ_IOWAIT if the task is waking up after an IO wait
 + *
 + * Each time a task wakes up after an IO operation, the CPU utilization can be
 + * boosted to a certain utilization which doubles at each "frequent and
-+ * successive" wakeup from IO, ranging from SMART_IOWAIT_BOOST_MIN to the
-+ * utilization of the maximum OPP.
++ * successive" wakeup from IO, ranging from SMUT_IOWAIT_BOOST_MIN to the utilization
++ * of the maximum OPP.
 + *
 + * To keep doubling, an IO boost has to be requested at least once per tick,
 + * otherwise we restart from the utilization of the minimum OPP.
 + */
-+static void smart_iowait_boost(struct smart_cpu *sg_cpu, u64 time,
++static void smut_iowait_boost(struct smut_cpu *sg_cpu, u64 time,
 +			       unsigned int flags)
 +{
 +	bool set_iowait_boost = flags & SCHED_CPUFREQ_IOWAIT;
++
 +	/* Reset boost if the CPU appears to have been idle enough */
 +	if (sg_cpu->iowait_boost &&
-+	    smart_iowait_reset(sg_cpu, time, set_iowait_boost))
++	    smut_iowait_reset(sg_cpu, time, set_iowait_boost))
 +		return;
++
 +	/* Boost only tasks waking up after IO */
 +	if (!set_iowait_boost)
 +		return;
++
 +	/* Ensure boost doubles only one time at each request */
 +	if (sg_cpu->iowait_boost_pending)
 +		return;
 +	sg_cpu->iowait_boost_pending = true;
++
 +	/* Double the boost at each request */
 +	if (sg_cpu->iowait_boost) {
 +		sg_cpu->iowait_boost =
 +			min_t(unsigned int, sg_cpu->iowait_boost << 1, SCHED_CAPACITY_SCALE);
 +		return;
 +	}
++
 +	/* First wakeup after IO: start with minimum boost */
-+	sg_cpu->iowait_boost = SMART_IOWAIT_BOOST_MIN;
++	sg_cpu->iowait_boost = SMUT_IOWAIT_BOOST_MIN;
 +}
 +
 +/**
-+ * smart_iowait_apply() - Apply the IO boost to a CPU.
-+ * @sg_cpu: the smartutil data for the CPU to boost
++ * smut_iowait_apply() - Apply the IO boost to a CPU.
++ * @sg_cpu: the smartutil data for the cpu to boost
 + * @time: the update time from the caller
 + * @max_cap: the max CPU capacity
 + *
 + * A CPU running a task which woken up after an IO operation can have its
 + * utilization boosted to speed up the completion of those IO operations.
 + * The IO boost value is increased each time a task wakes up from IO, in
-+ * smart_iowait_apply(), and it's instead decreased by this function, each
-+ * time an increase has not been requested (!iowait_boost_pending).
++ * smut_iowait_apply(), and it's instead decreased by this function,
++ * each time an increase has not been requested (!iowait_boost_pending).
 + *
 + * A CPU which also appears to have been idle for at least one tick has also
 + * its IO boost utilization reset.
 + *
 + * This mechanism is designed to boost high frequently IO waiting tasks, while
 + * being more conservative on tasks which does sporadic IO operations.
-+ *
-+ * Smartutil: the boost is applied to the utilization that drives the
-+ * frequency, and the frequency is then limited by both the ceiling and the
-+ * ramp, so a burst of IO wakeups cannot push the CPU to the top of its
-+ * range on its own.
 + */
-+static void smart_iowait_apply(struct smart_cpu *sg_cpu, u64 time,
++static void smut_iowait_apply(struct smut_cpu *sg_cpu, u64 time,
 +			       unsigned long max_cap)
 +{
 +	unsigned long boost;
++
 +	/* No boost currently required */
 +	if (!sg_cpu->iowait_boost)
 +		return;
++
 +	/* Reset boost if the CPU appears to have been idle enough */
-+	if (smart_iowait_reset(sg_cpu, time, false))
++	if (smut_iowait_reset(sg_cpu, time, false))
 +		return;
++
 +	if (!sg_cpu->iowait_boost_pending) {
 +		/*
 +		 * No boost pending; reduce the boost value.
 +		 */
 +		sg_cpu->iowait_boost >>= 1;
-+		if (sg_cpu->iowait_boost < SMART_IOWAIT_BOOST_MIN) {
++		if (sg_cpu->iowait_boost < SMUT_IOWAIT_BOOST_MIN) {
 +			sg_cpu->iowait_boost = 0;
 +			return;
 +		}
 +	}
++
 +	sg_cpu->iowait_boost_pending = false;
++
 +	/*
 +	 * sg_cpu->util is already in capacity scale; convert iowait_boost
 +	 * into the same scale so we can compare.
 +	 */
 +	boost = (sg_cpu->iowait_boost * max_cap) >> SCHED_CAPACITY_SHIFT;
-+	boost = uclamp_rq_util_with(cpu_rq(sg_cpu->cpu), boost, NULL);
 +	if (sg_cpu->util < boost)
 +		sg_cpu->util = boost;
 +}
 +
-+#ifdef CONFIG_NO_HZ_COMMON
-+static bool smart_cpu_is_busy(struct smart_cpu *sg_cpu)
-+{
-+	unsigned long idle_calls = tick_nohz_get_idle_calls_cpu(sg_cpu->cpu);
-+	bool ret = idle_calls == sg_cpu->saved_idle_calls;
-+	sg_cpu->saved_idle_calls = idle_calls;
-+	return ret;
-+}
-+#else
-+static inline bool smart_cpu_is_busy(struct smart_cpu *sg_cpu) { return false; }
-+#endif /* CONFIG_NO_HZ_COMMON */
-+
 +/*
-+ * Make smart_should_update_freq() ignore the rate limit when DL
++ * Make smut_should_update_freq() ignore the rate limit when DL
 + * has increased the utilization.
 + */
-+static inline void smart_ignore_dl_rate_limit(struct smart_cpu *sg_cpu)
++static inline void smut_ignore_dl_rate_limit(struct smut_cpu *sg_cpu)
 +{
 +	if (cpu_bw_dl(cpu_rq(sg_cpu->cpu)) > sg_cpu->bw_dl)
 +		sg_cpu->sg_policy->limits_changed = true;
 +}
 +
-+static inline bool smart_update_single_common(struct smart_cpu *sg_cpu,
++static inline bool smut_update_single_common(struct smut_cpu *sg_cpu,
 +					      u64 time, unsigned long max_cap,
 +					      unsigned int flags)
 +{
-+	smart_iowait_boost(sg_cpu, time, flags);
++	smut_iowait_boost(sg_cpu, time, flags);
 +	sg_cpu->last_update = time;
-+	smart_ignore_dl_rate_limit(sg_cpu);
-+	if (!smart_should_update_freq(sg_cpu->sg_policy, time))
++
++	smut_ignore_dl_rate_limit(sg_cpu);
++
++	if (!smut_should_update_freq(sg_cpu->sg_policy, time))
 +		return false;
-+	smart_get_util(sg_cpu);
-+	smart_iowait_apply(sg_cpu, time, max_cap);
++
++	smut_get_util(sg_cpu);
++	smut_iowait_apply(sg_cpu, time, max_cap);
++
 +	return true;
 +}
 +
-+static void smart_update_single_freq(struct update_util_data *hook, u64 time,
++static void smut_update_single_freq(struct update_util_data *hook, u64 time,
 +				     unsigned int flags)
 +{
-+	struct smart_cpu *sg_cpu = container_of(hook, struct smart_cpu, update_util);
-+	struct smart_policy *sg_policy = sg_cpu->sg_policy;
-+	unsigned int cached_freq = sg_policy->cached_raw_freq;
++	struct smut_cpu *sg_cpu = container_of(hook, struct smut_cpu, update_util);
++	struct smut_policy *sg_policy = sg_cpu->sg_policy;
 +	unsigned long max_cap;
 +	unsigned int next_f;
 +
 +	max_cap = arch_scale_cpu_capacity(sg_cpu->cpu);
-+	if (!smart_update_single_common(sg_cpu, time, max_cap, flags))
++
++	if (!smut_update_single_common(sg_cpu, time, max_cap, flags))
 +		return;
 +
-+	next_f = smart_get_next_freq(sg_policy, sg_cpu->util, max_cap);
++	next_f = smut_next_freq(sg_policy, sg_cpu->util, max_cap);
 +
-+	/*
-+	 * Do not reduce the frequency if the CPU has not been idle
-+	 * recently, as the reduction is likely to be premature then.
-+	 *
-+	 * Except when the rq is capped by uclamp_max.
-+	 */
-+	if (!uclamp_rq_is_capped(cpu_rq(sg_cpu->cpu)) &&
-+	    smart_cpu_is_busy(sg_cpu) && next_f < sg_policy->next_freq &&
-+	    !sg_policy->need_freq_update) {
-+		next_f = sg_policy->next_freq;
-+		/* Restore cached freq as next_freq has changed */
-+		sg_policy->cached_raw_freq = cached_freq;
-+	}
-+
-+	/* Smartutil: ramp the frequency towards the target. */
-+	next_f = smart_ramp_freq(sg_cpu, next_f, time);
-+
-+	if (!smart_update_next_freq(sg_policy, time, next_f))
++	if (!smut_update_next_freq(sg_policy, time, next_f))
 +		return;
 +
 +	/*
@@ -838,19 +653,16 @@ new file mode 100644
 +		cpufreq_driver_fast_switch(sg_policy->policy, next_f);
 +	} else {
 +		raw_spin_lock(&sg_policy->update_lock);
-+		smart_deferred_update(sg_policy);
++		smut_deferred_update(sg_policy);
 +		raw_spin_unlock(&sg_policy->update_lock);
 +	}
 +}
 +
-+static void smart_update_single_perf(struct update_util_data *hook, u64 time,
++static void smut_update_single_perf(struct update_util_data *hook, u64 time,
 +				     unsigned int flags)
 +{
-+	struct smart_cpu *sg_cpu = container_of(hook, struct smart_cpu, update_util);
-+	struct smart_policy *sg_policy = sg_cpu->sg_policy;
-+	unsigned long prev_util = sg_cpu->util;
-+	unsigned long max_cap, util;
-+	unsigned int cap_pct;
++	struct smut_cpu *sg_cpu = container_of(hook, struct smut_cpu, update_util);
++	unsigned long max_cap;
 +
 +	/*
 +	 * Fall back to the "frequency" path if frequency invariance is not
@@ -858,94 +670,86 @@ new file mode 100644
 +	 * the performance levels depends on the frequency invariance.
 +	 */
 +	if (!arch_scale_freq_invariant()) {
-+		smart_update_single_freq(hook, time, flags);
++		smut_update_single_freq(hook, time, flags);
 +		return;
 +	}
 +
 +	max_cap = arch_scale_cpu_capacity(sg_cpu->cpu);
-+	if (!smart_update_single_common(sg_cpu, time, max_cap, flags))
++
++	if (!smut_update_single_common(sg_cpu, time, max_cap, flags))
 +		return;
 +
-+	/*
-+	 * Do not reduce the target performance level if the CPU has not been
-+	 * idle recently, as the reduction is likely to be premature then.
-+	 *
-+	 * Except when the rq is capped by uclamp_max.
-+	 */
-+	if (!uclamp_rq_is_capped(cpu_rq(sg_cpu->cpu)) &&
-+	    smart_cpu_is_busy(sg_cpu) && sg_cpu->util < prev_util)
-+		sg_cpu->util = prev_util;
++	cpufreq_driver_adjust_perf(sg_cpu->cpu, sg_cpu->bw_dl,
++				   sg_cpu->util, max_cap);
 +
-+	/* Smartutil: cap and ramp the requested performance level. */
-+	cap_pct = smart_cap_pct(sg_policy->tunables, sg_cpu->util, max_cap);
-+	util = smart_cap_perf(sg_cpu->util, max_cap, cap_pct);
-+	util = smart_ramp_perf(sg_cpu, util, max_cap, time);
-+
-+	cpufreq_driver_adjust_perf(sg_cpu->cpu, map_util_perf(sg_cpu->bw_dl),
-+				   map_util_perf(util), max_cap);
-+	sg_policy->last_freq_update_time = time;
++	sg_cpu->sg_policy->last_freq_update_time = time;
 +}
 +
-+static unsigned int smart_next_freq_shared(struct smart_cpu *sg_cpu, u64 time)
++static unsigned int smut_next_freq_shared(struct smut_cpu *sg_cpu, u64 time)
 +{
-+	struct smart_policy *sg_policy = sg_cpu->sg_policy;
++	struct smut_policy *sg_policy = sg_cpu->sg_policy;
 +	struct cpufreq_policy *policy = sg_policy->policy;
 +	unsigned long util = 0, max_cap;
 +	unsigned int j;
 +
 +	max_cap = arch_scale_cpu_capacity(sg_cpu->cpu);
-+	for_each_cpu(j, policy->cpus) {
-+		struct smart_cpu *j_sg_cpu = &per_cpu(smart_cpu, j);
 +
-+		smart_get_util(j_sg_cpu);
-+		smart_iowait_apply(j_sg_cpu, time, max_cap);
++	for_each_cpu(j, policy->cpus) {
++		struct smut_cpu *j_sg_cpu = &per_cpu(smut_cpu, j);
++
++		smut_get_util(j_sg_cpu);
++		smut_iowait_apply(j_sg_cpu, time, max_cap);
++
 +		util = max(j_sg_cpu->util, util);
 +	}
 +
-+	return smart_get_next_freq(sg_policy, util, max_cap);
++	return smut_next_freq(sg_policy, util, max_cap);
 +}
 +
 +static void
-+smart_update_shared(struct update_util_data *hook, u64 time, unsigned int flags)
++smut_update_shared(struct update_util_data *hook, u64 time, unsigned int flags)
 +{
-+	struct smart_cpu *sg_cpu = container_of(hook, struct smart_cpu, update_util);
-+	struct smart_policy *sg_policy = sg_cpu->sg_policy;
++	struct smut_cpu *sg_cpu = container_of(hook, struct smut_cpu, update_util);
++	struct smut_policy *sg_policy = sg_cpu->sg_policy;
 +	unsigned int next_f;
 +
 +	raw_spin_lock(&sg_policy->update_lock);
-+	smart_iowait_boost(sg_cpu, time, flags);
++
++	smut_iowait_boost(sg_cpu, time, flags);
 +	sg_cpu->last_update = time;
-+	smart_ignore_dl_rate_limit(sg_cpu);
-+	if (smart_should_update_freq(sg_policy, time)) {
-+		next_f = smart_next_freq_shared(sg_cpu, time);
-+		/* Smartutil: ramp the frequency towards the target. */
-+		next_f = smart_ramp_freq(sg_cpu, next_f, time);
-+		if (!smart_update_next_freq(sg_policy, time, next_f))
++
++	smut_ignore_dl_rate_limit(sg_cpu);
++
++	if (smut_should_update_freq(sg_policy, time)) {
++		next_f = smut_next_freq_shared(sg_cpu, time);
++
++		if (!smut_update_next_freq(sg_policy, time, next_f))
 +			goto unlock;
++
 +		if (sg_policy->policy->fast_switch_enabled)
 +			cpufreq_driver_fast_switch(sg_policy->policy, next_f);
 +		else
-+			smart_deferred_update(sg_policy);
++			smut_deferred_update(sg_policy);
 +	}
 +unlock:
 +	raw_spin_unlock(&sg_policy->update_lock);
 +}
 +
-+static void smart_work(struct kthread_work *work)
++static void smut_work(struct kthread_work *work)
 +{
-+	struct smart_policy *sg_policy = container_of(work, struct smart_policy, work);
++	struct smut_policy *sg_policy = container_of(work, struct smut_policy, work);
 +	unsigned int freq;
 +	unsigned long flags;
 +
 +	/*
 +	 * Hold sg_policy->update_lock shortly to handle the case where:
 +	 * in case sg_policy->next_freq is read here, and then updated by
-+	 * smart_deferred_update() just before work_in_progress is set to false
++	 * smut_deferred_update() just before work_in_progress is set to false
 +	 * here, we may miss queueing the new update.
 +	 *
 +	 * Note: If a work was queued after the update_lock is released,
-+	 * smart_work() will just be called again by kthread_work code; and the
-+	 * request will be proceed before the smartutil thread sleeps.
++	 * smut_work() will just be called again by kthread_work code; and the
++	 * request will be proceed before the smut thread sleeps.
 +	 */
 +	raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
 +	freq = sg_policy->next_freq;
@@ -957,157 +761,131 @@ new file mode 100644
 +	mutex_unlock(&sg_policy->work_lock);
 +}
 +
-+static void smart_irq_work(struct irq_work *irq_work)
++static void smut_irq_work(struct irq_work *irq_work)
 +{
-+	struct smart_policy *sg_policy;
++	struct smut_policy *sg_policy;
 +
-+	sg_policy = container_of(irq_work, struct smart_policy, irq_work);
++	sg_policy = container_of(irq_work, struct smut_policy, irq_work);
++
 +	kthread_queue_work(&sg_policy->worker, &sg_policy->work);
 +}
 +
 +/************************** sysfs interface ************************/
-+static struct smart_tunables *global_tunables;
-+static DEFINE_MUTEX(global_tunables_lock);
 +
-+static inline struct smart_tunables *to_smart_tunables(struct gov_attr_set *attr_set)
++static struct smut_tunables *smut_global_tunables;
++static DEFINE_MUTEX(smut_global_tunables_lock);
++
++static inline struct smut_tunables *to_smut_tunables(struct gov_attr_set *attr_set)
 +{
-+	return container_of(attr_set, struct smart_tunables, attr_set);
++	return container_of(attr_set, struct smut_tunables, attr_set);
 +}
-+
-+static ssize_t rate_limit_us_show(struct gov_attr_set *attr_set, char *buf)
-+{
-+	struct smart_tunables *tunables = to_smart_tunables(attr_set);
-+	return sysfs_emit(buf, "%u\n", tunables->rate_limit_us);
-+}
-+
-+static ssize_t
-+rate_limit_us_store(struct gov_attr_set *attr_set, const char *buf, size_t count)
-+{
-+	struct smart_tunables *tunables = to_smart_tunables(attr_set);
-+	struct smart_policy *sg_policy;
-+	unsigned int rate_limit_us;
-+
-+	if (kstrtouint(buf, 10, &rate_limit_us))
-+		return -EINVAL;
-+
-+	tunables->rate_limit_us = rate_limit_us;
-+	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook)
-+		sg_policy->freq_update_delay_ns = rate_limit_us * NSEC_PER_USEC;
-+
-+	return count;
-+}
-+
-+static struct governor_attr rate_limit_us = __ATTR_RW(rate_limit_us);
 +
 +/*
-+ * Generic tunable helpers: all Smartutil knobs are plain unsigned integers
-+ * (percentages, counts or microseconds) which are simply clamped on write.
++ * Plain tunables: only the value in struct smut_tunables changes, nothing
++ * needs to be pushed into the per-policy state.
 + */
-+#define smart_tunable_uint_rw(_name, _min, _max)				\
-+static ssize_t _name##_show(struct gov_attr_set *attr_set, char *buf)	\
++#define SMUT_TUNABLE_RW(name)						\
++static ssize_t name##_show(struct gov_attr_set *attr_set, char *buf)	\
 +{									\
-+	struct smart_tunables *tunables = to_smart_tunables(attr_set);	\
-+	return sysfs_emit(buf, "%u\n", tunables->_name);			\
++	struct smut_tunables *tunables = to_smut_tunables(attr_set);	\
++	return sprintf(buf, "%u\n", tunables->name);			\
 +}									\
-+static ssize_t _name##_store(struct gov_attr_set *attr_set,		\
-+			     const char *buf, size_t count)		\
++									\
++static ssize_t								\
++name##_store(struct gov_attr_set *attr_set, const char *buf, size_t count)\
 +{									\
-+	struct smart_tunables *tunables = to_smart_tunables(attr_set);	\
++	struct smut_tunables *tunables = to_smut_tunables(attr_set);	\
 +	unsigned int val;						\
 +									\
 +	if (kstrtouint(buf, 10, &val))					\
 +		return -EINVAL;						\
-+	tunables->_name = clamp_val(val, _min, _max);			\
++									\
++	tunables->name = val;						\
 +	return count;							\
 +}									\
-+static struct governor_attr _name = __ATTR_RW(_name)
++									\
++static struct governor_attr name = __ATTR_RW(name)
 +
-+smart_tunable_uint_rw(idle_util_thresh, 0, 100);
-+smart_tunable_uint_rw(idle_freq_cap_pct, 0, 100);
-+smart_tunable_uint_rw(heavy_util_thresh, 0, 100);
-+smart_tunable_uint_rw(heavy_freq_cap_pct, 0, 100);
-+smart_tunable_uint_rw(ramp_up_step_pct, 0, 100);
-+smart_tunable_uint_rw(ramp_down_step_pct, 0, 100);
++/*
++ * Rate limits also live in struct smut_policy (as nanoseconds), so they
++ * have to be pushed into every policy bound to this tunables set. After a
++ * change, min_rate_limit_ns has to be recomputed since either limit can
++ * now be the smaller of the two.
++ */
++#define SMUT_RATE_LIMIT_RW(name, field)					\
++static ssize_t name##_show(struct gov_attr_set *attr_set, char *buf)	\
++{									\
++	struct smut_tunables *tunables = to_smut_tunables(attr_set);	\
++	return sprintf(buf, "%u\n", tunables->name);			\
++}									\
++									\
++static ssize_t								\
++name##_store(struct gov_attr_set *attr_set, const char *buf, size_t count)\
++{									\
++	struct smut_tunables *tunables = to_smut_tunables(attr_set);	\
++	struct smut_policy *sg_policy;					\
++	unsigned int val;						\
++									\
++	if (kstrtouint(buf, 10, &val))					\
++		return -EINVAL;						\
++									\
++	tunables->name = val;						\
++									\
++	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) { \
++		sg_policy->field = val * NSEC_PER_USEC;			\
++		smut_update_min_rate_limit_ns(sg_policy);		\
++	}								\
++									\
++	return count;							\
++}									\
++									\
++static struct governor_attr name = __ATTR_RW(name)
 +
-+static ssize_t smart_enabled_show(struct gov_attr_set *attr_set, char *buf)
-+{
-+	struct smart_tunables *tunables = to_smart_tunables(attr_set);
-+	return sysfs_emit(buf, "%u\n", tunables->smart_enabled);
-+}
++SMUT_RATE_LIMIT_RW(up_rate_limit_us, up_rate_delay_ns);
++SMUT_RATE_LIMIT_RW(down_rate_limit_us, down_rate_delay_ns);
 +
-+static ssize_t smart_enabled_store(struct gov_attr_set *attr_set,
-+				   const char *buf, size_t count)
-+{
-+	struct smart_tunables *tunables = to_smart_tunables(attr_set);
-+	bool val;
++SMUT_TUNABLE_RW(target_load1);
++SMUT_TUNABLE_RW(target_load2);
++SMUT_TUNABLE_RW(boost_light_pct);
++SMUT_TUNABLE_RW(cut_heavy_pct);
++SMUT_TUNABLE_RW(cap_light_pct);
++SMUT_TUNABLE_RW(cap_mid_pct);
++SMUT_TUNABLE_RW(cap_heavy_pct);
 +
-+	if (kstrtobool(buf, &val))
-+		return -EINVAL;
-+
-+	tunables->smart_enabled = val;
-+	return count;
-+}
-+
-+static struct governor_attr smart_enabled = __ATTR_RW(smart_enabled);
-+
-+static struct attribute *smart_attrs[] = {
-+	&rate_limit_us.attr,
-+	&smart_enabled.attr,
-+	&idle_util_thresh.attr,
-+	&idle_freq_cap_pct.attr,
-+	&heavy_util_thresh.attr,
-+	&heavy_freq_cap_pct.attr,
-+	&ramp_up_step_pct.attr,
-+	&ramp_down_step_pct.attr,
++static struct attribute *smut_attrs[] = {
++	&up_rate_limit_us.attr,
++	&down_rate_limit_us.attr,
++	&target_load1.attr,
++	&target_load2.attr,
++	&boost_light_pct.attr,
++	&cut_heavy_pct.attr,
++	&cap_light_pct.attr,
++	&cap_mid_pct.attr,
++	&cap_heavy_pct.attr,
 +	NULL
 +};
++ATTRIBUTE_GROUPS(smut);
 +
-+ATTRIBUTE_GROUPS(smart);
-+
-+static void smart_tunables_free(struct kobject *kobj)
++static void smut_tunables_free(struct kobject *kobj)
 +{
 +	struct gov_attr_set *attr_set = to_gov_attr_set(kobj);
-+	kfree(to_smart_tunables(attr_set));
++
++	kfree(to_smut_tunables(attr_set));
 +}
 +
-+static const struct kobj_type smart_tunables_ktype = {
-+	.default_groups = smart_groups,
++static const struct kobj_type smut_tunables_ktype = {
++	.default_groups = smut_groups,
 +	.sysfs_ops = &governor_sysfs_ops,
-+	.release = &smart_tunables_free,
-+};
-+
-+/*
-+ * Forward declarations: smartutil_gov is instantiated here, but the callbacks
-+ * are defined further down (cpufreq_schedutil.c keeps the same order, defining
-+ * schedutil_gov only after every sugov_* callback).
-+ */
-+static int smart_init(struct cpufreq_policy *policy);
-+static void smart_exit(struct cpufreq_policy *policy);
-+static int smart_start(struct cpufreq_policy *policy);
-+static void smart_stop(struct cpufreq_policy *policy);
-+static void smart_limits(struct cpufreq_policy *policy);
-+
-+/*
-+ * Deliberately not static: cpufreq_default_governor() in
-+ * kernel/sched/cpufreq_schedutil.c returns this governor when
-+ * CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL is selected, so the symbol has to be
-+ * visible outside of this translation unit.
-+ */
-+struct cpufreq_governor smartutil_gov = {
-+	.name			= "smartutil",
-+	.owner			= THIS_MODULE,
-+	.flags			= CPUFREQ_GOV_DYNAMIC_SWITCHING,
-+	.init			= smart_init,
-+	.exit			= smart_exit,
-+	.start			= smart_start,
-+	.stop			= smart_stop,
-+	.limits			= smart_limits,
++	.release = &smut_tunables_free,
 +};
 +
 +/********************** cpufreq governor interface *********************/
-+static struct smart_policy *smart_policy_alloc(struct cpufreq_policy *policy)
++
++struct cpufreq_governor smartutil_gov;
++
++static struct smut_policy *smut_policy_alloc(struct cpufreq_policy *policy)
 +{
-+	struct smart_policy *sg_policy;
++	struct smut_policy *sg_policy;
 +
 +	sg_policy = kzalloc(sizeof(*sg_policy), GFP_KERNEL);
 +	if (!sg_policy)
@@ -1118,12 +896,12 @@ new file mode 100644
 +	return sg_policy;
 +}
 +
-+static void smart_policy_free(struct smart_policy *sg_policy)
++static void smut_policy_free(struct smut_policy *sg_policy)
 +{
 +	kfree(sg_policy);
 +}
 +
-+static int smart_kthread_create(struct smart_policy *sg_policy)
++static int smut_kthread_create(struct smut_policy *sg_policy)
 +{
 +	struct task_struct *thread;
 +	struct sched_attr attr = {
@@ -1147,13 +925,13 @@ new file mode 100644
 +	if (policy->fast_switch_enabled)
 +		return 0;
 +
-+	kthread_init_work(&sg_policy->work, smart_work);
++	kthread_init_work(&sg_policy->work, smut_work);
 +	kthread_init_worker(&sg_policy->worker);
 +	thread = kthread_create(kthread_worker_fn, &sg_policy->worker,
-+				"smartutil:%d",
++				"smut:%d",
 +				cpumask_first(policy->related_cpus));
 +	if (IS_ERR(thread)) {
-+		pr_err("failed to create smartutil thread: %ld\n", PTR_ERR(thread));
++		pr_err("failed to create smut thread: %ld\n", PTR_ERR(thread));
 +		return PTR_ERR(thread);
 +	}
 +
@@ -1166,13 +944,15 @@ new file mode 100644
 +
 +	sg_policy->thread = thread;
 +	kthread_bind_mask(thread, policy->related_cpus);
-+	init_irq_work(&sg_policy->irq_work, smart_irq_work);
++	init_irq_work(&sg_policy->irq_work, smut_irq_work);
 +	mutex_init(&sg_policy->work_lock);
++
 +	wake_up_process(thread);
++
 +	return 0;
 +}
 +
-+static void smart_kthread_stop(struct smart_policy *sg_policy)
++static void smut_kthread_stop(struct smut_policy *sg_policy)
 +{
 +	/* kthread only required for slow path */
 +	if (sg_policy->policy->fast_switch_enabled)
@@ -1183,99 +963,126 @@ new file mode 100644
 +	mutex_destroy(&sg_policy->work_lock);
 +}
 +
-+static struct smart_tunables *smart_tunables_alloc(struct smart_policy *sg_policy)
++static struct smut_tunables *smut_tunables_alloc(struct smut_policy *sg_policy)
 +{
-+	struct smart_tunables *tunables;
++	struct smut_tunables *tunables;
 +
 +	tunables = kzalloc(sizeof(*tunables), GFP_KERNEL);
 +	if (tunables) {
 +		gov_attr_set_init(&tunables->attr_set, &sg_policy->tunables_hook);
 +		if (!have_governor_per_policy())
-+			global_tunables = tunables;
++			smut_global_tunables = tunables;
 +	}
 +	return tunables;
 +}
 +
-+static void smart_clear_global_tunables(void)
++static void smut_clear_global_tunables(void)
 +{
 +	if (!have_governor_per_policy())
-+		global_tunables = NULL;
++		smut_global_tunables = NULL;
 +}
 +
-+static int smart_init(struct cpufreq_policy *policy)
++static int smut_init(struct cpufreq_policy *policy)
 +{
-+	struct smart_policy *sg_policy;
-+	struct smart_tunables *tunables;
++	struct smut_policy *sg_policy;
++	struct smut_tunables *tunables;
++	static bool banner_printed;
 +	int ret = 0;
 +
 +	/* State should be equivalent to EXIT */
 +	if (policy->governor_data)
 +		return -EBUSY;
 +
++	if (!banner_printed) {
++		banner_printed = true;
++		pr_info("%s by %s\n",
++			CPUFREQ_SMARTUTIL_PROGNAME, CPUFREQ_SMARTUTIL_AUTHOR);
++	}
++
 +	cpufreq_enable_fast_switch(policy);
 +
-+	sg_policy = smart_policy_alloc(policy);
++	sg_policy = smut_policy_alloc(policy);
 +	if (!sg_policy) {
 +		ret = -ENOMEM;
 +		goto disable_fast_switch;
 +	}
 +
-+	ret = smart_kthread_create(sg_policy);
++	ret = smut_kthread_create(sg_policy);
 +	if (ret)
 +		goto free_sg_policy;
 +
-+	mutex_lock(&global_tunables_lock);
++	mutex_lock(&smut_global_tunables_lock);
 +
-+	if (global_tunables) {
++	if (smut_global_tunables) {
 +		if (WARN_ON(have_governor_per_policy())) {
 +			ret = -EINVAL;
 +			goto stop_kthread;
 +		}
 +		policy->governor_data = sg_policy;
-+		sg_policy->tunables = global_tunables;
-+		gov_attr_set_get(&global_tunables->attr_set, &sg_policy->tunables_hook);
++		sg_policy->tunables = smut_global_tunables;
++
++		gov_attr_set_get(&smut_global_tunables->attr_set, &sg_policy->tunables_hook);
 +		goto out;
 +	}
 +
-+	tunables = smart_tunables_alloc(sg_policy);
++	tunables = smut_tunables_alloc(sg_policy);
 +	if (!tunables) {
 +		ret = -ENOMEM;
 +		goto stop_kthread;
 +	}
 +
-+	tunables->rate_limit_us = cpufreq_policy_transition_delay_us(policy);
-+	tunables->smart_enabled = true;
-+	tunables->idle_util_thresh = 25;
-+	tunables->idle_freq_cap_pct = 40;
-+	tunables->heavy_util_thresh = 70;
-+	tunables->heavy_freq_cap_pct = 95;
-+	tunables->ramp_up_step_pct = 10;
-+	tunables->ramp_down_step_pct = 15;
++	/*
++	 * Defaults. Kept conservative on purpose: nothing here should change
++	 * behaviour dramatically before the owner has had a chance to
++	 * calibrate on real hardware.
++	 *
++	 *  - up_rate_limit_us   1ms   : react quickly when load appears
++	 *  - down_rate_limit_us 2ms   : let an idle CPU fall to policy->min
++	 *  - target_load1/2      40/80 : light / medium / heavy boundaries
++	 *  - boost_light_pct     10    : small headroom at light load
++	 *  - cut_heavy_pct       10    : trim at heavy load, main heat control
++	 *  - cap_*_pct           100   : per-tier ceilings disabled by default
++	 *
++	 * Note the ANDROID up/down patch this is modelled on used
++	 * cpufreq_policy_transition_delay_us(policy) for both limits. Explicit
++	 * values are used here so that the two directions are independently
++	 * tunable from the start rather than tied to the driver's single
++	 * transition delay.
++	 */
++	tunables->up_rate_limit_us	= 1000;
++	tunables->down_rate_limit_us	= 2000;
++	tunables->target_load1		= 40;
++	tunables->target_load2		= 80;
++	tunables->boost_light_pct	= 10;
++	tunables->cut_heavy_pct		= 10;
++	tunables->cap_light_pct		= 100;
++	tunables->cap_mid_pct		= 100;
++	tunables->cap_heavy_pct		= 100;
 +
 +	policy->governor_data = sg_policy;
 +	sg_policy->tunables = tunables;
 +
-+	ret = kobject_init_and_add(&tunables->attr_set.kobj, &smart_tunables_ktype,
++	ret = kobject_init_and_add(&tunables->attr_set.kobj, &smut_tunables_ktype,
 +				   get_governor_parent_kobj(policy), "%s",
 +				   smartutil_gov.name);
 +	if (ret)
 +		goto fail;
 +
 +out:
-+	mutex_unlock(&global_tunables_lock);
++	mutex_unlock(&smut_global_tunables_lock);
 +	return 0;
 +
 +fail:
 +	kobject_put(&tunables->attr_set.kobj);
 +	policy->governor_data = NULL;
-+	smart_clear_global_tunables();
++	smut_clear_global_tunables();
 +
 +stop_kthread:
-+	smart_kthread_stop(sg_policy);
-+	mutex_unlock(&global_tunables_lock);
++	smut_kthread_stop(sg_policy);
++	mutex_unlock(&smut_global_tunables_lock);
 +
 +free_sg_policy:
-+	smart_policy_free(sg_policy);
++	smut_policy_free(sg_policy);
 +
 +disable_fast_switch:
 +	cpufreq_disable_fast_switch(policy);
@@ -1284,68 +1091,71 @@ new file mode 100644
 +	return ret;
 +}
 +
-+static void smart_exit(struct cpufreq_policy *policy)
++static void smut_exit(struct cpufreq_policy *policy)
 +{
-+	struct smart_policy *sg_policy = policy->governor_data;
-+	struct smart_tunables *tunables = sg_policy->tunables;
++	struct smut_policy *sg_policy = policy->governor_data;
++	struct smut_tunables *tunables = sg_policy->tunables;
 +	unsigned int count;
 +
-+	mutex_lock(&global_tunables_lock);
++	mutex_lock(&smut_global_tunables_lock);
 +
 +	count = gov_attr_set_put(&tunables->attr_set, &sg_policy->tunables_hook);
 +	policy->governor_data = NULL;
-+
 +	if (!count)
-+		smart_clear_global_tunables();
++		smut_clear_global_tunables();
 +
-+	mutex_unlock(&global_tunables_lock);
++	mutex_unlock(&smut_global_tunables_lock);
 +
-+	smart_kthread_stop(sg_policy);
-+	smart_policy_free(sg_policy);
++	smut_kthread_stop(sg_policy);
++	smut_policy_free(sg_policy);
 +	cpufreq_disable_fast_switch(policy);
 +}
 +
-+static int smart_start(struct cpufreq_policy *policy)
++static int smut_start(struct cpufreq_policy *policy)
 +{
-+	struct smart_policy *sg_policy = policy->governor_data;
++	struct smut_policy *sg_policy = policy->governor_data;
 +	void (*uu)(struct update_util_data *data, u64 time, unsigned int flags);
 +	unsigned int cpu;
 +
-+	sg_policy->freq_update_delay_ns	= sg_policy->tunables->rate_limit_us * NSEC_PER_USEC;
++	sg_policy->up_rate_delay_ns =
++		sg_policy->tunables->up_rate_limit_us * NSEC_PER_USEC;
++	sg_policy->down_rate_delay_ns =
++		sg_policy->tunables->down_rate_limit_us * NSEC_PER_USEC;
++	smut_update_min_rate_limit_ns(sg_policy);
 +	sg_policy->last_freq_update_time	= 0;
-+	sg_policy->next_freq		= 0;
-+	sg_policy->work_in_progress	= false;
-+	sg_policy->limits_changed	= false;
-+	sg_policy->cached_raw_freq	= 0;
++	sg_policy->next_freq			= 0;
++	sg_policy->work_in_progress		= false;
++	sg_policy->limits_changed		= false;
++	sg_policy->cached_raw_freq		= 0;
++
 +	sg_policy->need_freq_update = cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS);
 +
 +	for_each_cpu(cpu, policy->cpus) {
-+		struct smart_cpu *sg_cpu = &per_cpu(smart_cpu, cpu);
++		struct smut_cpu *sg_cpu = &per_cpu(smut_cpu, cpu);
 +
 +		memset(sg_cpu, 0, sizeof(*sg_cpu));
-+		sg_cpu->cpu		= cpu;
-+		sg_cpu->sg_policy	= sg_policy;
++		sg_cpu->cpu			= cpu;
++		sg_cpu->sg_policy		= sg_policy;
 +	}
 +
 +	if (policy_is_shared(policy))
-+		uu = smart_update_shared;
++		uu = smut_update_shared;
 +	else if (policy->fast_switch_enabled && cpufreq_driver_has_adjust_perf())
-+		uu = smart_update_single_perf;
++		uu = smut_update_single_perf;
 +	else
-+		uu = smart_update_single_freq;
++		uu = smut_update_single_freq;
 +
 +	for_each_cpu(cpu, policy->cpus) {
-+		struct smart_cpu *sg_cpu = &per_cpu(smart_cpu, cpu);
++		struct smut_cpu *sg_cpu = &per_cpu(smut_cpu, cpu);
 +
 +		cpufreq_add_update_util_hook(cpu, &sg_cpu->update_util, uu);
 +	}
-+
 +	return 0;
 +}
 +
-+static void smart_stop(struct cpufreq_policy *policy)
++static void smut_stop(struct cpufreq_policy *policy)
 +{
-+	struct smart_policy *sg_policy = policy->governor_data;
++	struct smut_policy *sg_policy = policy->governor_data;
 +	unsigned int cpu;
 +
 +	for_each_cpu(cpu, policy->cpus)
@@ -1359,9 +1169,9 @@ new file mode 100644
 +	}
 +}
 +
-+static void smart_limits(struct cpufreq_policy *policy)
++static void smut_limits(struct cpufreq_policy *policy)
 +{
-+	struct smart_policy *sg_policy = policy->governor_data;
++	struct smut_policy *sg_policy = policy->governor_data;
 +
 +	if (!policy->fast_switch_enabled) {
 +		mutex_lock(&sg_policy->work_lock);
@@ -1372,6 +1182,29 @@ new file mode 100644
 +	sg_policy->limits_changed = true;
 +}
 +
++struct cpufreq_governor smartutil_gov = {
++	.name			= "smartutil",
++	.owner			= THIS_MODULE,
++	.flags			= CPUFREQ_GOV_DYNAMIC_SWITCHING,
++	.init			= smut_init,
++	.exit			= smut_exit,
++	.start			= smut_start,
++	.stop			= smut_stop,
++	.limits			= smut_limits,
++};
++
++#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL
++struct cpufreq_governor *cpufreq_default_governor(void)
++{
++	return &smartutil_gov;
++}
++#endif
++
 +cpufreq_governor_init(smartutil_gov);
++
++MODULE_AUTHOR(CPUFREQ_SMARTUTIL_AUTHOR);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION(CPUFREQ_SMARTUTIL_PROGNAME);
 -- 
 2.56.0
+
