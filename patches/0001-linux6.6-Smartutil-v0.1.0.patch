@@ -1,50 +1,8 @@
 From f7494fd7fcb15a20e71abe6d017306c4869ce4cc Mon Sep 17 00:00:00 2001
 From: artecxyz <artecxyz404@gmail.com>
 Date: Thu, 22 Oct 2026 14:24:49 +0700
-Subject: [PATCH] cpufreq: Add smartutil governor (standalone schedutil clone)
+Subject: [PATCH] Smartutil CPUFreq Governor v0.1.0
 
-smartutil is a fresh standalone governor based on the upstream 6.6
-schedutil, renamed into its own namespace and given its own tunables so
-that both governors can be built at the same time and selected
-independently via scaling_governor.
-
-The governor framework is taken from upstream as-is. Three things are
-deliberately different from schedutil:
-
-  - No fixed 25% headroom. Utilization is mapped strictly proportionally
-    and a load-tiered adjustment is applied on top, so an idle CPU is
-    driven towards policy->min while a loaded one gets only the headroom
-    it actually needs.
-  - No "must have been idle" guard before reducing frequency. Waiting
-    for an idle call before dropping the frequency keeps lightly loaded
-    but never-idling CPUs pinned high, which is the opposite of the
-    goal.
-  - Separate up/down rate limits, so ramps down can be throttled without
-    also throttling ramps up.
-
-The up/down rate limits follow the ANDROID implementation already used
-here: smut_should_update_freq() uses min(up, down) purely as an
-early-out, and the direction-specific limit is applied in
-smut_update_next_freq() once the direction of the transition is known.
-That way neither limit can delay a transition belonging to the other
-direction.
-
-Each load tier also has an optional frequency ceiling expressed as a
-percentage of the policy maximum, which keeps a busy CPU from being
-pinned at max and is the main heat-control knob.
-
-Tunables, exposed per policy under
-/sys/devices/system/cpu/cpufreq/policy*/smartutil/:
-
-  up_rate_limit_us, down_rate_limit_us
-  target_load1, target_load2
-  boost_light_pct, cut_heavy_pct
-  cap_light_pct, cap_mid_pct, cap_heavy_pct
-
-The governor is not enabled by any defconfig; set
-CONFIG_CPU_FREQ_GOV_SMARTUTIL=y (or m) where it is wanted.
-
-Signed-off-by: artecxyz <artecxyz404@gmail.com>
 ---
  drivers/cpufreq/Kconfig          |   32 +
  kernel/sched/build_utility.c     |    4 +
