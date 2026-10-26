@@ -1,34 +1,35 @@
 diff --git a/kernel/Kbuild b/kernel/Kbuild
-index b7655cb3..1578c87e 100644
+index ef9b1379..67f22951 100644
 --- a/kernel/Kbuild
 +++ b/kernel/Kbuild
-@@ -98,7 +98,7 @@ ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+@@ -99,7 +99,7 @@ ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
  ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
  
  ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
 -$(info -- Supported Managers: KernelSU Official, KOWSU, BakaSU )
-+$(info -- Supported Managers: KernelSU Official, KOWSU, BakaSU, MamboSU, KernelSU-Next)
++$(info -- Supported Managers: KernelSU Official, KOWSU, BakaSU, MamboSU, FinaSU, KernelSU-Next)
  endif
  
  KERNEL_VERSION := $(VERSION).$(PATCHLEVEL)
 diff --git a/kernel/manager/apk_sign.c b/kernel/manager/apk_sign.c
-index eba496d5..22676f5e 100644
+index eba496d5..9a38d497 100644
 --- a/kernel/manager/apk_sign.c
 +++ b/kernel/manager/apk_sign.c
-@@ -36,6 +36,8 @@ static apk_sign_key_t apk_sign_keys[] = {
+@@ -36,6 +36,9 @@ static apk_sign_key_t apk_sign_keys[] = {
  #ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
      { EXPECTED_SIZE_OFFICIAL, EXPECTED_HASH_OFFICIAL }, // tiann/KernelSU
      { EXPECTED_SIZE_KOWX712, EXPECTED_HASH_KOWX712 }, // KOWX712/KernelSU
 +    { EXPECTED_SIZE_KSUNEXT, EXPECTED_HASH_KSUNEXT }, // rifsxd/KernelSU-Next
 +    { EXPECTED_SIZE_MAMBOSU, EXPECTED_HASH_MAMBOSU }, // RapliVx/MamboSU
++    { EXPECTED_SIZE_FINASU, EXPECTED_HASH_FINASU }, // LyraVoid/FinaSU
  #ifdef EXPECTED_SIZE
      { EXPECTED_SIZE, EXPECTED_HASH }, // Custom
  #endif
 diff --git a/kernel/manager/manager_sign.h b/kernel/manager/manager_sign.h
-index a940135d..5f289cb0 100644
+index a940135d..c33eceff 100644
 --- a/kernel/manager/manager_sign.h
 +++ b/kernel/manager/manager_sign.h
-@@ -13,6 +13,14 @@
+@@ -13,6 +13,18 @@
  #define EXPECTED_SIZE_KOWX712 0x375
  #define EXPECTED_HASH_KOWX712 "484fcba6e6c43b1fb09700633bf2fb4758f13cb0b2f4457b80d075084b26c588"
  
@@ -39,6 +40,10 @@ index a940135d..5f289cb0 100644
 +// RapliVx/MamboSU
 +#define EXPECTED_SIZE_MAMBOSU 0x384
 +#define EXPECTED_HASH_MAMBOSU "a9462b8b98ea1ca7901b0cbdcebfaa35f0aa95e51b01d66e6b6d2c81b97746d8"
++
++// LyraVoid/FinaSU
++#define EXPECTED_SIZE_MAMBOSU 0x2cc
++#define EXPECTED_HASH_MAMBOSU "2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458"
 +
  typedef struct {
      unsigned size;
