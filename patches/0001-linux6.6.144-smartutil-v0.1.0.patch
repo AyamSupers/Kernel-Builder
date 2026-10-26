@@ -1,16 +1,16 @@
-From e06f9247fdab9f1b0783708a8e80261ebe486eb3 Mon Sep 17 00:00:00 2001
+From dcd9e3726d7931a8d2409184ac7c0ab56a02cdce Mon Sep 17 00:00:00 2001
 From: artecxyz <artecxyz404@gmail.com>
-Date: Sun, 25 Oct 2026 23:54:57 +0700
+Date: Mon, 26 Oct 2026 14:19:36 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.1.0
 
 ---
  drivers/cpufreq/Kconfig             |   32 +
  drivers/cpufreq/Makefile            |    1 +
- drivers/cpufreq/cpufreq_smartutil.c | 1532 +++++++++++++++++++++++++++
- include/linux/sched/cpufreq.h       |   20 +
+ drivers/cpufreq/cpufreq_smartutil.c | 1448 +++++++++++++++++++++++++++
+ include/linux/sched/cpufreq.h       |   11 +
  kernel/sched/cpufreq_schedutil.c    |   15 +
  kernel/sched/pelt.c                 |   14 +
- 6 files changed, 1614 insertions(+)
+ 6 files changed, 1521 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
@@ -77,30 +77,31 @@ index e2657bf89735..9efcb6dd7a43 100644
  obj-$(CONFIG_CPUFREQ_DT_PLATDEV)	+= cpufreq-dt-platdev.o
 diff --git a/drivers/cpufreq/cpufreq_smartutil.c b/drivers/cpufreq/cpufreq_smartutil.c
 new file mode 100644
-index 000000000000..59a431e912ae
+index 000000000000..5a14ec2251b8
 --- /dev/null
 +++ b/drivers/cpufreq/cpufreq_smartutil.c
-@@ -0,0 +1,1532 @@
+@@ -0,0 +1,1448 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil CPUFreq governor (based on schedutil)
 + * Copyright (C) 2026 Artecxyz
 + *
-+ * Smartutil consumes the same scheduler utilization data as schedutil, but
-+ * deliberately drops three of its habits: the fixed 25% headroom, the
-+ * "must have been idle first" guard before lowering the frequency, and the
-+ * single rate limit shared by both directions. In their place it maps
-+ * utilization purely proportionally, adds its own headroom per load tier
-+ * (boost_light_pct / cut_heavy_pct), and keeps separate up/down rate limits,
-+ * with an optional per-tier frequency ceiling (cap_light_pct / cap_mid_pct /
-+ * cap_heavy_pct) as the main heat control. Because a saturated CPU's
-+ * utilization is censored at the capacity it already has, PELT alone ramps
-+ * too slowly to answer a burst; smartutil therefore also measures demand
-+ * directly, keeps an envelope of it that rises at once, and holds a
-+ * latency-aware speed floor built from the Energy Model or a cube law
-+ * (latency_weight). There is no mode and no state machine: one algorithm,
-+ * fully tunable at runtime through the smartutil/ sysfs directory of each
-+ * policy.
++ * schedutil, with the demand above a saturated CPU's capacity measured
++ * instead of waited out.  PELT cannot report more than the capacity a
++ * saturated CPU already has, so the demand above it is censored and PELT
++ * climbs out at its own pace.  Each CPU closes intervals of at least
++ * max(min_rate_limit_ns, 1 tick) and measures the work done over one,
++ * D = busy * freq_scale * capacity, from kcpustat's idle time: an
++ * interval with idle shows the demand exactly, one with none is censored.
++ * H is the envelope of D, rising at once and decaying like PELT; with N,
++ * the running time seen lately, it gives p, the probability the CPU is
++ * behind its work.
++ *
++ * The request is util = max(PELT, H) capped by uclamp_max, mapped to
++ * frequency with per-tier headroom and ceilings, and floored at
++ * s*(p * lambda): the speed minimizing energy plus latency per unit of
++ * work, from the Energy Model or a cube law.  lambda is the
++ * latency_weight tunable, per mille of lambda_max.
 + */
 +
 +#include <linux/arch_topology.h>
@@ -129,57 +130,45 @@ index 000000000000..59a431e912ae
 +#define CPUFREQ_SMARTUTIL_PROGNAME "Smartutil CPUFreq Governor"
 +#define CPUFREQ_SMARTUTIL_AUTHOR   "Artecxyz"
 +
++#define CPUFREQ_SMARTUTIL_VERSION  "0.1.0"
++
++/* SCHED_FLAG_SUGOV is private to kernel/sched/sched.h; hardcode here. */
++#define SCHED_FLAG_SUGOV	0x10000000
++
 +#define SMUT_IOWAIT_BOOST_MIN	(SCHED_CAPACITY_SCALE / 8)
 +
-+/* Reported by the read-only "version" tunable */
-+#define CPUFREQ_SMARTUTIL_VERSION "0.1.0"
-+
-+/*
-+ * The speed floor s*(p * lambda) is tabulated at this many evenly spaced p,
-+ * so that an update only has to look the answer up.
-+ */
++/* Floor table granularity: s*(p * lambda) is tabulated at this many p. */
 +#define SMUT_FLOOR_N		65
 +
-+/*
-+ * latency_weight is lambda as per mille of lambda_max, the value of lambda
-+ * at which the floor reaches the top state: 1000 gets there at p = 1.
-+ */
++/* latency_weight: lambda per mille of lambda_max; 1000 tops out at p = 1. */
 +#define SMUT_LATENCY_WEIGHT_DEF	1000
 +#define SMUT_LATENCY_WEIGHT_LIM	100000
 +
 +struct smut_tunables {
 +	struct gov_attr_set	attr_set;
 +
-+	/*
-+	 * Rate limits, in microseconds. Unlike schedutil, smartutil keeps
-+	 * separate limits for the two directions, so an idle CPU can fall
-+	 * back to policy->min quickly without also letting the frequency
-+	 * ramp up just as eagerly.
-+	 */
 +	unsigned int		up_rate_limit_us;
 +	unsigned int		down_rate_limit_us;
 +
 +	/*
-+	 * Load tiers, in percent of CPU capacity. util/max below
-+	 * target_load1 is "light", between the two is "medium", above
-+	 * target_load2 is "heavy".
++	 * Load tiers, in percent of CPU capacity: below target_load1 is
++	 * "light", between the two "medium", above target_load2 "heavy".
 +	 */
 +	unsigned int		target_load1;
 +	unsigned int		target_load2;
 +
 +	/*
-+	 * Headroom / trim, in percent, applied on top of the strictly
-+	 * proportional base mapping. Light load gets a little headroom so
-+	 * the governor stays reactive; heavy load is trimmed so a game is
-+	 * answered without parking the CPU at max.
++	 * Headroom / trim, in percent, on top of the proportional base
++	 * mapping. Light load gets a little headroom to stay reactive; heavy
++	 * load is trimmed so a game is answered without parking at max.
 +	 */
 +	unsigned int		boost_light_pct;
 +	unsigned int		cut_heavy_pct;
 +
 +	/*
-+	 * Per-tier frequency ceiling, in percent of policy->cpuinfo.max_freq.
-+	 * 100 disables the cap for that tier. Lowering cap_heavy_pct on the
-+	 * prime policy is the strongest single heat-control knob.
++	 * Per-tier frequency ceiling, in percent of cpuinfo.max_freq; 100
++	 * disables it. Lowering cap_heavy_pct on the prime policy is the
++	 * strongest single heat-control knob.
 +	 */
 +	unsigned int		cap_light_pct;
 +	unsigned int		cap_mid_pct;
@@ -271,8 +260,7 @@ index 000000000000..59a431e912ae
 +	mutex_unlock(&smut_min_rate_lock);
 +
 +	/*
-+	 * The measured-demand interval follows the governor's own pace: there
-+	 * is nothing to learn from sampling faster than it can act, and an
++	 * The measured-demand interval follows the governor's own pace: an
 +	 * interval shorter than a tick can be all busy by chance, which tells
 +	 * nothing about falling behind.
 +	 */
@@ -306,19 +294,16 @@ index 000000000000..59a431e912ae
 +static bool smut_should_update_freq(struct smut_policy *sg_policy, u64 time)
 +{
 +	/*
-+	 * Since cpufreq_update_util() is called with rq->lock held for
-+	 * the @target_cpu, our per-CPU data is fully serialized.
++	 * cpufreq_update_util() is called with rq->lock held for the
++	 * @target_cpu, so our per-CPU data is fully serialized.
 +	 *
-+	 * However, drivers cannot in general deal with cross-CPU
-+	 * requests, so while smut_next_freq() will work, our
-+	 * smut_update_commit() call may not for the fast switching platforms.
-+	 *
-+	 * Hence stop here for remote requests if they aren't supported
-+	 * by the hardware, as calculating the frequency is pointless if
-+	 * we cannot in fact act on it.
-+	 *
-+	 * This is needed on the slow switching platforms too to prevent CPUs
-+	 * going offline from leaving stale IRQ work items behind.
++	 * Drivers cannot in general deal with cross-CPU requests, so while
++	 * smut_next_freq() will work, smut_update_commit() may not for the
++	 * fast switching platforms. Hence stop here for remote requests if
++	 * they aren't supported by the hardware, as calculating the frequency
++	 * is pointless if we cannot act on it. This is needed on the slow
++	 * switching platforms too, to keep offline CPUs from leaving stale
++	 * IRQ work items behind.
 +	 */
 +	if (!cpufreq_this_cpu_can_update(sg_policy->policy))
 +		return false;
@@ -331,7 +316,7 @@ index 000000000000..59a431e912ae
 +
 +	/*
 +	 * Nothing to gain from recalculating next freq again before
-+	 * min_rate_limit_ns has elapsed. The direction-specific limits are
++	 * min_rate_limit_ns has elapsed; the direction-specific limits are
 +	 * applied later, once the direction is known.
 +	 */
 +	return time - sg_policy->last_freq_update_time >=
@@ -344,12 +329,11 @@ index 000000000000..59a431e912ae
 +	if (sg_policy->need_freq_update) {
 +		sg_policy->need_freq_update = false;
 +		/*
-+		 * The policy limits have changed, but if the return value of
++		 * The policy limits have changed, but if
 +		 * cpufreq_driver_resolve_freq() after applying the new limits
-+		 * is still equal to the previously selected frequency, the
-+		 * driver callback need not be invoked unless the driver
-+		 * specifically wants that to happen on every update of the
-+		 * policy limits.
++		 * still equals the previously selected frequency, the driver
++		 * callback need not be invoked unless the driver specifically
++		 * wants that on every policy limits update.
 +		 */
 +		if (sg_policy->next_freq == next_freq &&
 +		    !cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS))
@@ -380,9 +364,8 @@ index 000000000000..59a431e912ae
 +}
 +
 +/**
-+ * smut_capacity_ref_freq - get the reference frequency that has been used to
-+ * correlate frequency and compute capacity for a given cpufreq policy. We use
-+ * the CPU managing it for the arch_scale_freq_ref() call in the function.
++ * smut_capacity_ref_freq - reference frequency used to correlate frequency
++ * and capacity for a given cpufreq policy.
 + * @policy: the cpufreq policy of the CPU in question.
 + *
 + * Return: the reference CPU frequency to compute a capacity.
@@ -408,48 +391,26 @@ index 000000000000..59a431e912ae
 +/************************ Measured demand ***********************/
 +
 +/*
-+ * Why any of this is here: PELT is a decaying average, and on a CPU that is
-+ * saturated it cannot report more than the capacity that CPU currently has
-+ * -- the rest is censored. Climbing out of that takes PELT's full 32-period
-+ * half-life, by which time a burst of work has long finished.
++ * PELT is a decaying average, and a saturated CPU cannot report more than
++ * the capacity it already has -- the rest is censored. Climbing out takes
++ * PELT's full 32-period half-life, long after a burst has finished.
 + *
-+ * So demand is measured instead of averaged. Every interval of at least
-+ * sample_delay_ns is closed with
++ * So demand is measured instead. Each interval of at least sample_delay_ns
++ * closes with D = busy * freq_scale * capacity, in PELT's units but
++ * available from the first interval; an interval with idle in it measures
++ * demand exactly, one with none is censored.
 + *
-+ *	D = busy * freq_scale * capacity
-+ *
-+ * the work done in the interval expressed at the CPU's maximum capacity:
-+ * the same units as PELT's frequency-invariant utilization, but there from
-+ * the first interval rather than half a lifetime later. An interval with any
-+ * idle in it measures demand exactly; an interval with no idle at all is
-+ * censored -- the CPU fell behind and cannot say by how much.
-+ *
-+ * Two numbers are carried per CPU:
-+ *
-+ *	H, the envelope of D. It jumps to D at once and only decays at PELT's
-+ *	pace, so a CPU that stops being asked for work forgets the demand it
-+ *	last saw exactly as PELT forgets.
-+ *
-+ *	N, the decayed running time: the evidence that the CPU has been
-+ *	running lately.
-+ *
-+ * From them comes p, the chance that the CPU is behind its work:
-+ *
-+ *	p = 1				after a censored interval
-+ *	p = alpha / (N + alpha)	otherwise, alpha = sample_delay_ns
-+ *
-+ * and p picks a speed floor s*(p * lambda) out of a table built once per
-+ * policy: the frequency minimising (power + p * lambda) / frequency, the
-+ * cheapest way to finish the work at hand when p * lambda is what a unit of
-+ * delay is worth. lambda_max is the lambda at which the floor reaches the
-+ * top state, so latency_weight = 1000 arrives there at p = 1.
++ * Per CPU, H is the envelope of D -- it jumps to D at once and decays at
++ * PELT's pace -- and N the decayed running time. They give p, the chance
++ * the CPU is behind: 1 after a censored interval, alpha / (N + alpha)
++ * otherwise. p picks a speed floor s*(p * lambda) from a table built once
++ * per policy.
 + */
 +
 +/*
-+ * An idle CPU needs no speed: a sibling's or remote CPU's measured state
-+ * counts only while it runs. This CPU's own callback always counts: on a
++ * An idle CPU needs no speed. This CPU's own callback always counts: on a
 + * wakeup it runs from the enqueue, while idle_cpu() still says idle, and
-+ * that is exactly when H must bridge the gap since the last burst.
++ * that is when H must bridge the gap since the last burst.
 + */
 +static inline bool smut_active(struct smut_cpu *sg_cpu)
 +{
@@ -517,10 +478,9 @@ index 000000000000..59a431e912ae
 +
 +#ifdef CONFIG_ENERGY_MODEL
 +/*
-+ * From the Energy Model. A state's energy per unit of work is power / f, so
++ * From the Energy Model: a state's energy per unit of work is power / f, so
 + * s*(l) is the state least in (power + l) / f. The top state wins for every
-+ * l >= lambda_max, the largest (P_top * f - P * f_top) / (f_top - f) over
-+ * the states below it.
++ * l >= lambda_max.
 + */
 +static bool smut_em_floors(struct smut_policy *sg_policy, unsigned int weight)
 +{
@@ -595,8 +555,7 @@ index 000000000000..59a431e912ae
 +
 +/*
 + * Without an Energy Model, a cube law: with P(s) = s^3 for s = f / fmax,
-+ * (s^3 + l) / s is least at s = cbrt(l / 2), so lambda_max = 2 and
-+ * s*(p * lambda) = cbrt(p * weight / 1000).
++ * (s^3 + l) / s is least at s = cbrt(l / 2), so lambda_max = 2.
 + */
 +static void smut_cube_floors(struct smut_policy *sg_policy, unsigned int weight)
 +{
@@ -616,9 +575,8 @@ index 000000000000..59a431e912ae
 +}
 +
 +/*
-+ * Rebuild the floor table: at start, on a limits change (cpuinfo.max_freq,
-+ * which the cube-law floor scales, may move), on a latency_weight store and
-+ * when the Energy Model's table changes.
++ * Rebuild the floor table: at start, on a limits change, on a
++ * latency_weight store, and when the Energy Model's table changes.
 + */
 +static void smut_speed_floors(struct smut_policy *sg_policy)
 +{
@@ -629,9 +587,8 @@ index 000000000000..59a431e912ae
 +}
 +
 +/*
-+ * The speed floor in kHz, s*(p * lambda), p = 1 after a censored interval
-+ * and alpha / (N + alpha) otherwise. It takes no headroom, and uclamp_max
-+ * (bw_max) caps it here. The per-tier ceiling caps it once more in
++ * The speed floor in kHz, s*(p * lambda). It takes no headroom, and
++ * uclamp_max (bw_max) caps it here; the per-tier ceiling caps it again in
 + * smut_next_freq(), so the heat control keeps the last word.
 + */
 +static unsigned int smut_floor(struct smut_cpu *sg_cpu, unsigned long max_cap)
@@ -678,31 +635,20 @@ index 000000000000..59a431e912ae
 + * @max: CPU capacity.
 + * @floor: Speed floor in kHz (0 for none), from the measured demand.
 + *
-+ * The base mapping is strictly proportional to the utilization, with no
-+ * fixed headroom, so a lightly loaded or idle CPU is driven towards
-+ * policy->min instead of hovering in the middle of the OPP table:
++ * The base mapping is strictly proportional, with no fixed headroom, so a
++ * lightly loaded CPU is driven towards policy->min:
 + *
 + *	base = ref_freq * util / max
 + *
-+ * On top of that, three load tiers decide how much headroom or trim to
-+ * apply and whether a frequency ceiling is in force:
++ * Three load tiers then decide headroom or trim and the ceiling in force:
 + *
 + *	light  (load <  target_load1): base + boost_light_pct
 + *	medium (target_load1..target_load2): base as-is
 + *	heavy  (load >= target_load2): base - cut_heavy_pct
 + *
-+ * Each tier also has a cap expressed as a percentage of
-+ * policy->cpuinfo.max_freq, which bounds the result no matter how high the
-+ * utilization goes. That cap is the main heat control: a game is answered
-+ * with the frequency it actually needs rather than the maximum.
-+ *
-+ * The floor lifts the result, but never above the tier ceiling: the caps are
-+ * the heat control, and a CPU measured to be behind its work still has to
-+ * live with them.
-+ *
-+ * The lowest driver-supported frequency which is equal or greater than the
-+ * raw next_freq (as calculated above) is returned, subject to policy min/max
-+ * and cpufreq driver limitations.
++ * Each tier's cap is a percentage of policy->cpuinfo.max_freq, bounds the
++ * result regardless of utilization, and is the main heat control. The floor
++ * lifts the result but never above that ceiling.
 + */
 +static unsigned int smut_next_freq(struct smut_policy *sg_policy,
 +				   unsigned long util, unsigned long max,
@@ -726,9 +672,8 @@ index 000000000000..59a431e912ae
 +
 +		if (load < tunables->target_load1) {
 +			/*
-+			 * Light load. A little headroom keeps the governor
-+			 * reactive (app launch, scrolling) without parking
-+			 * the CPU high.
++			 * Light load: a little headroom keeps the governor
++			 * reactive without parking the CPU high.
 +			 */
 +			freq += freq * tunables->boost_light_pct / 100;
 +			cap_pct = tunables->cap_light_pct;
@@ -737,10 +682,9 @@ index 000000000000..59a431e912ae
 +			cap_pct = tunables->cap_mid_pct;
 +		} else {
 +			/*
-+			 * Heavy load. Trim the target so the CPU answers the
-+			 * load without being pinned at max; the last few
-+			 * percent of frequency are the most expensive in
-+			 * power and heat.
++			 * Heavy load: trim so the CPU answers the load
++			 * without being pinned at max; the last few percent
++			 * of frequency are the most expensive.
 +			 */
 +			freq -= freq * tunables->cut_heavy_pct / 100;
 +			cap_pct = tunables->cap_heavy_pct;
@@ -769,11 +713,10 @@ index 000000000000..59a431e912ae
 +}
 +
 +/*
-+ * NOTE: this is the one part of the governor that is tied to the host
-+ * kernel's scheduler-util API. Upstream 6.6 exposes
-+ * effective_cpu_util(cpu, util, FREQUENCY_UTIL, NULL); this tree instead
-+ * exposes effective_cpu_util(cpu, util, &min, &max). The two are
-+ * equivalent in effect, only the plumbing differs.
++ * NOTE: this is the one part tied to the host kernel's scheduler-util API.
++ * Upstream 6.6 exposes effective_cpu_util(cpu, util, FREQUENCY_UTIL, NULL);
++ * this tree exposes effective_cpu_util(cpu, util, &min, &max). Equivalent
++ * in effect, only the plumbing differs.
 + */
 +static void smut_get_util(struct smut_cpu *sg_cpu)
 +{
@@ -785,10 +728,8 @@ index 000000000000..59a431e912ae
 +
 +	/*
 +	 * Deliberately no map_util_perf() headroom here. schedutil bakes a
-+	 * fixed 25% headroom into the utilization, which pins the frequency
-+	 * high across the whole light-load range. smartutil applies its own
-+	 * load-dependent headroom in smut_next_freq(), so the tipping point is
-+	 * fully owned by the tunables instead.
++	 * fixed 25% headroom in, which pins the frequency high across the
++	 * whole light-load range; the load tiers own that decision instead.
 +	 */
 +	if (util < max)
 +		max = util;
@@ -800,11 +741,9 @@ index 000000000000..59a431e912ae
 +	sg_cpu->util = max(min, max);
 +
 +	/*
-+	 * Then the measured envelope, which is where a saturated CPU escapes
-+	 * PELT's censoring: H is the demand the CPU has actually been shown to
-+	 * have, at its maximum capacity, from the very first interval rather
-+	 * than a 32-period half-life later. It takes no headroom for the same
-+	 * reason the PELT signal takes none: the load tiers own that decision.
++	 * Then the measured envelope, where a saturated CPU escapes PELT's
++	 * censoring: H is the demand it has actually been shown to have, from
++	 * the first interval. It takes no headroom, for the same reason.
 +	 */
 +	if (smut_active(sg_cpu))
 +		sg_cpu->util = max(sg_cpu->util, min(sg_cpu->H, sg_cpu->bw_max));
@@ -816,10 +755,9 @@ index 000000000000..59a431e912ae
 + * @time: the update time from the caller
 + * @set_iowait_boost: true if an IO boost has been requested
 + *
-+ * The IO wait boost of a task is disabled after a tick since the last update
-+ * of a CPU. If a new IO wait boost is requested after more then a tick, then
-+ * we enable the boost starting from SMUT_IOWAIT_BOOST_MIN, which improves energy
-+ * efficiency by ignoring sporadic wakeups from IO.
++ * The boost is disabled after a tick since the last update; a later request
++ * restarts it from SMUT_IOWAIT_BOOST_MIN, which saves energy by ignoring
++ * sporadic wakeups from IO.
 + */
 +static bool smut_iowait_reset(struct smut_cpu *sg_cpu, u64 time,
 +			       bool set_iowait_boost)
@@ -842,13 +780,10 @@ index 000000000000..59a431e912ae
 + * @time: the update time from the caller
 + * @flags: SCHED_CPUFREQ_IOWAIT if the task is waking up after an IO wait
 + *
-+ * Each time a task wakes up after an IO operation, the CPU utilization can be
-+ * boosted to a certain utilization which doubles at each "frequent and
-+ * successive" wakeup from IO, ranging from SMUT_IOWAIT_BOOST_MIN to the utilization
-+ * of the maximum OPP.
-+ *
-+ * To keep doubling, an IO boost has to be requested at least once per tick,
-+ * otherwise we restart from the utilization of the minimum OPP.
++ * Each wakeup after an IO operation doubles the boost, from
++ * SMUT_IOWAIT_BOOST_MIN up to the utilization of the maximum OPP. To keep
++ * doubling it has to be requested at least once per tick, otherwise it
++ * restarts from the minimum OPP.
 + */
 +static void smut_iowait_boost(struct smut_cpu *sg_cpu, u64 time,
 +			       unsigned int flags)
@@ -886,17 +821,9 @@ index 000000000000..59a431e912ae
 + * @time: the update time from the caller
 + * @max_cap: the max CPU capacity
 + *
-+ * A CPU running a task which woken up after an IO operation can have its
-+ * utilization boosted to speed up the completion of those IO operations.
-+ * The IO boost value is increased each time a task wakes up from IO, in
-+ * smut_iowait_apply(), and it's instead decreased by this function,
-+ * each time an increase has not been requested (!iowait_boost_pending).
-+ *
-+ * A CPU which also appears to have been idle for at least one tick has also
-+ * its IO boost utilization reset.
-+ *
-+ * This mechanism is designed to boost high frequently IO waiting tasks, while
-+ * being more conservative on tasks which does sporadic IO operations.
++ * The boost raised in smut_iowait_boost() is lowered here each time an
++ * increase was not requested, and reset once the CPU has been idle for a
++ * tick. Frequent IO waiters are boosted, sporadic ones are not.
 + */
 +static void smut_iowait_apply(struct smut_cpu *sg_cpu, u64 time,
 +			       unsigned long max_cap)
@@ -986,8 +913,8 @@ index 000000000000..59a431e912ae
 +
 +	/*
 +	 * This code runs under rq->lock for the target CPU, so it won't run
-+	 * concurrently on two different CPUs for the same target and it is not
-+	 * necessary to acquire the lock in the fast switch case.
++	 * concurrently for the same target, and the lock need not be acquired
++	 * in the fast switch case.
 +	 */
 +	if (sg_policy->policy->fast_switch_enabled) {
 +		cpufreq_driver_fast_switch(sg_policy->policy, next_f);
@@ -1006,8 +933,8 @@ index 000000000000..59a431e912ae
 +
 +	/*
 +	 * Fall back to the "frequency" path if frequency invariance is not
-+	 * supported, because the direct mapping between the utilization and
-+	 * the performance levels depends on the frequency invariance.
++	 * supported, because the direct mapping between utilization and the
++	 * performance levels depends on it.
 +	 */
 +	if (!arch_scale_freq_invariant()) {
 +		smut_update_single_freq(hook, time, flags);
@@ -1020,9 +947,9 @@ index 000000000000..59a431e912ae
 +		return;
 +
 +	/*
-+	 * The floor is handed over in capacity units. The per-tier ceilings are
-+	 * frequency-path knobs and do not apply here, exactly like the tier
-+	 * mapping itself does not.
++	 * The floor is handed over in capacity units. The per-tier ceilings
++	 * are frequency-path knobs and do not apply here, just like the tier
++	 * mapping itself.
 +	 */
 +	cpufreq_driver_adjust_perf(sg_cpu->cpu, sg_cpu->bw_dl,
 +				   max(sg_cpu->util,
@@ -1094,14 +1021,13 @@ index 000000000000..59a431e912ae
 +	unsigned long flags;
 +
 +	/*
-+	 * Hold sg_policy->update_lock shortly to handle the case where:
-+	 * in case sg_policy->next_freq is read here, and then updated by
-+	 * smut_deferred_update() just before work_in_progress is set to false
-+	 * here, we may miss queueing the new update.
++	 * Hold sg_policy->update_lock shortly: if next_freq is read here and
++	 * then updated by smut_deferred_update() just before work_in_progress
++	 * is set to false, we may miss queueing the new update.
 +	 *
-+	 * Note: If a work was queued after the update_lock is released,
-+	 * smut_work() will just be called again by kthread_work code; and the
-+	 * request will be proceed before the smut thread sleeps.
++	 * Note: if a work was queued after the lock is released, smut_work()
++	 * will just be called again by kthread_work code, and the request
++	 * will be processed before the smut thread sleeps.
 +	 */
 +	raw_spin_lock_irqsave(&sg_policy->update_lock, flags);
 +	freq = sg_policy->next_freq;
@@ -1160,9 +1086,8 @@ index 000000000000..59a431e912ae
 +
 +/*
 + * Rate limits also live in struct smut_policy (as nanoseconds), so they
-+ * have to be pushed into every policy bound to this tunables set. After a
-+ * change, min_rate_limit_ns has to be recomputed since either limit can
-+ * now be the smaller of the two.
++ * have to be pushed into every bound policy, and min_rate_limit_ns
++ * recomputed since either limit can now be the smaller of the two.
 + */
 +#define SMUT_RATE_LIMIT_RW(name, field)					\
 +static ssize_t name##_show(struct gov_attr_set *attr_set, char *buf)	\
@@ -1233,14 +1158,7 @@ index 000000000000..59a431e912ae
 +
 +static struct governor_attr latency_weight = __ATTR_RW(latency_weight);
 +
-+static ssize_t version_show(struct gov_attr_set *attr_set, char *buf)
-+{
-+	return sprintf(buf, "%s\n", CPUFREQ_SMARTUTIL_VERSION);
-+}
-+static struct governor_attr version = __ATTR_RO(version);
-+
 +static struct attribute *smut_attrs[] = {
-+	&version.attr,
 +	&up_rate_limit_us.attr,
 +	&down_rate_limit_us.attr,
 +	&target_load1.attr,
@@ -1285,8 +1203,8 @@ index 000000000000..59a431e912ae
 +#ifdef CONFIG_ENERGY_MODEL
 +	/*
 +	 * The Energy Model, when the platform registered one for this CPU,
-+	 * gives the floor table real power figures. Without it the cube law is
-+	 * used instead.
++	 * gives the floor table real power figures; without it the cube law
++	 * is used.
 +	 */
 +	sg_policy->em_pd = em_cpu_get(policy->cpu);
 +#endif
@@ -1311,9 +1229,9 @@ index 000000000000..59a431e912ae
 +		 * Fake (unused) bandwidth; workaround to "fix"
 +		 * priority inheritance.
 +		 */
-+		.sched_runtime	=  1000000,
-+		.sched_deadline = 10000000,
-+		.sched_period	= 10000000,
++		.sched_runtime	= NSEC_PER_MSEC,
++		.sched_deadline = 10 * NSEC_PER_MSEC,
++		.sched_period	= 10 * NSEC_PER_MSEC,
 +	};
 +	struct cpufreq_policy *policy = sg_policy->policy;
 +	int ret;
@@ -1392,8 +1310,10 @@ index 000000000000..59a431e912ae
 +
 +	if (!banner_printed) {
 +		banner_printed = true;
-+		pr_info("%s by %s\n",
-+			CPUFREQ_SMARTUTIL_PROGNAME, CPUFREQ_SMARTUTIL_AUTHOR);
++		pr_info("%s %s by %s\n",
++			CPUFREQ_SMARTUTIL_PROGNAME,
++			CPUFREQ_SMARTUTIL_VERSION,
++			CPUFREQ_SMARTUTIL_AUTHOR);
 +	}
 +
 +	cpufreq_enable_fast_switch(policy);
@@ -1429,26 +1349,22 @@ index 000000000000..59a431e912ae
 +	}
 +
 +	/*
-+	 * Defaults. Kept conservative on purpose: nothing here should change
-+	 * behaviour dramatically before the owner has had a chance to
-+	 * calibrate on real hardware.
++	 * Defaults, kept conservative so nothing changes behaviour
++	 * dramatically before the owner has calibrated on real hardware:
 +	 *
 +	 *  - up_rate_limit_us   1ms   : react quickly when load appears
 +	 *  - down_rate_limit_us 2ms   : let an idle CPU fall to policy->min
 +	 *  - target_load1/2      40/80 : light / medium / heavy boundaries
 +	 *  - boost_light_pct     10    : small headroom at light load
 +	 *  - cut_heavy_pct       10    : trim at heavy load, main heat control
-+	 *  - cap_*_pct           100   : per-tier ceilings disabled by default
-+	 *  - latency_weight      1000   : lambda as per mille of lambda_max, so a
-+	 *                                censored CPU is floored at the top state.
-+	 *                                500 lands at ~79% of max at p = 1, and
-+	 *                                cap_*_pct bounds the floor either way
++	 *  - cap_*_pct           100   : per-tier ceilings disabled
++	 *  - latency_weight      1000   : lambda per mille of lambda_max, so a
++	 *                                censored CPU is floored at the top
++	 *                                state; cap_*_pct bounds it either way
 +	 *
-+	 * Note the ANDROID up/down patch this is modelled on used
-+	 * cpufreq_policy_transition_delay_us(policy) for both limits. Explicit
-+	 * values are used here so that the two directions are independently
-+	 * tunable from the start rather than tied to the driver's single
-+	 * transition delay.
++	 * The two directions are explicit rather than taken from
++	 * cpufreq_policy_transition_delay_us() so they stay independently
++	 * tunable.
 +	 */
 +	tunables->up_rate_limit_us	= 1000;
 +	tunables->down_rate_limit_us	= 2000;
@@ -1614,10 +1530,10 @@ index 000000000000..59a431e912ae
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION(CPUFREQ_SMARTUTIL_PROGNAME);
 diff --git a/include/linux/sched/cpufreq.h b/include/linux/sched/cpufreq.h
-index bdd31ab93bc5..644ace562edc 100644
+index bdd31ab93bc5..08d8b569ab76 100644
 --- a/include/linux/sched/cpufreq.h
 +++ b/include/linux/sched/cpufreq.h
-@@ -33,6 +33,26 @@ static inline unsigned long map_util_perf(unsigned long util)
+@@ -33,6 +33,17 @@ static inline unsigned long map_util_perf(unsigned long util)
  {
  	return util + (util >> 2);
  }
@@ -1631,15 +1547,6 @@ index bdd31ab93bc5..644ace562edc 100644
 +				 unsigned long *min, unsigned long *max);
 +unsigned long cpu_util_cfs_boost(int cpu);
 +u64 cpufreq_pelt_decay(u64 val, u64 delta_ns);
-+
-+/*
-+ * Flag that ranks a governor's kthread above SCHED_DEADLINE tasks while
-+ * still allowing it to sleep (see the comment in kernel/sched/sched.h).
-+ * That header defines the very same value, so including both is fine.
-+ */
-+#ifndef SCHED_FLAG_SUGOV
-+#define SCHED_FLAG_SUGOV	0x10000000
-+#endif
 +
  #endif /* CONFIG_CPU_FREQ */
  
