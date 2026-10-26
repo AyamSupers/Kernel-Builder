@@ -26,7 +26,7 @@ index eba496d5..9a38d497 100644
      { EXPECTED_SIZE, EXPECTED_HASH }, // Custom
  #endif
 diff --git a/kernel/manager/manager_sign.h b/kernel/manager/manager_sign.h
-index a940135d..c33eceff 100644
+index a940135d..86ed796b 100644
 --- a/kernel/manager/manager_sign.h
 +++ b/kernel/manager/manager_sign.h
 @@ -13,6 +13,18 @@
@@ -42,8 +42,8 @@ index a940135d..c33eceff 100644
 +#define EXPECTED_HASH_MAMBOSU "a9462b8b98ea1ca7901b0cbdcebfaa35f0aa95e51b01d66e6b6d2c81b97746d8"
 +
 +// LyraVoid/FinaSU
-+#define EXPECTED_SIZE_MAMBOSU 0x2cc
-+#define EXPECTED_HASH_MAMBOSU "2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458"
++#define EXPECTED_SIZE_FINASU 0x2cc
++#define EXPECTED_HASH_FINASU "2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458"
 +
  typedef struct {
      unsigned size;
