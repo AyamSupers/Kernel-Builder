@@ -1,16 +1,16 @@
-From 18680ee467874ba78c8bcac8473a462a03f1de32 Mon Sep 17 00:00:00 2001
+From 7b494b7ea02c43c898ce303b8afb3be112ec8718 Mon Sep 17 00:00:00 2001
 From: Artecxyz <artecxyz@local>
-Date: Tue, 27 Oct 2026 14:15:16 +0700
+Date: Wed, 28 Oct 2026 13:55:44 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.1.0
 
 ---
  drivers/cpufreq/Kconfig             |   36 +
  drivers/cpufreq/Makefile            |    1 +
- drivers/cpufreq/cpufreq_smartutil.c | 1604 +++++++++++++++++++++++++++
+ drivers/cpufreq/cpufreq_smartutil.c | 1623 +++++++++++++++++++++++++++
  include/linux/sched/cpufreq.h       |   11 +
  kernel/sched/cpufreq_schedutil.c    |   15 +
  kernel/sched/pelt.c                 |   14 +
- 6 files changed, 1681 insertions(+)
+ 6 files changed, 1700 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
@@ -81,10 +81,10 @@ index e2657bf89735..9efcb6dd7a43 100644
  obj-$(CONFIG_CPUFREQ_DT_PLATDEV)	+= cpufreq-dt-platdev.o
 diff --git a/drivers/cpufreq/cpufreq_smartutil.c b/drivers/cpufreq/cpufreq_smartutil.c
 new file mode 100644
-index 000000000000..9cc6bfd77514
+index 000000000000..e8d94cdb2b46
 --- /dev/null
 +++ b/drivers/cpufreq/cpufreq_smartutil.c
-@@ -0,0 +1,1604 @@
+@@ -0,0 +1,1623 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil CPUFreq governor (based on schedutil)
@@ -97,9 +97,8 @@ index 000000000000..9cc6bfd77514
 + * max(min_rate_limit_ns, 1 tick) and measures the work done over one,
 + * D = busy * freq_scale * capacity, from kcpustat's idle time: an
 + * interval with idle shows the demand exactly, one with none is censored.
-+ * H is the envelope of D, rising at once and decaying like PELT; with N,
-+ * the running time seen lately, it gives p, the probability the CPU is
-+ * behind its work.
++ * H is the envelope of D, rising at once and decaying like PELT; it gives
++ * p, the probability the CPU is behind its work.
 + *
 + * The request is util = max(PELT, H) capped by uclamp_max, mapped to
 + * frequency with per-tier headroom and ceilings, and floored at
@@ -217,7 +216,6 @@ index 000000000000..9cc6bfd77514
 +	unsigned int		cached_raw_freq;
 +
 +	s64			sample_delay_ns;	/* tau_min */
-+	unsigned int		alpha_us;		/* tau_min, in us */
 +
 +	/* Speed floors, kHz: s*(p * lambda) at p = k / (SMUT_FLOOR_N - 1) */
 +	unsigned int		floor[SMUT_FLOOR_N];
@@ -263,7 +261,6 @@ index 000000000000..9cc6bfd77514
 +	u64			last_wall;	/* kcpustat, us */
 +	u64			last_idle;	/* kcpustat, us */
 +	unsigned long		H;		/* envelope of measured demand */
-+	unsigned int		N;		/* running time seen lately, us */
 +	bool			censored;	/* last interval had no idle */
 +};
 +
@@ -291,7 +288,6 @@ index 000000000000..9cc6bfd77514
 +	 */
 +	sg_policy->sample_delay_ns = max_t(s64, sg_policy->min_rate_limit_ns,
 +				   TICK_NSEC);
-+	sg_policy->alpha_us = div_u64(sg_policy->sample_delay_ns, NSEC_PER_USEC);
 +}
 +
 +static bool smut_up_down_rate_limit(struct smut_policy *sg_policy, u64 time,
@@ -426,10 +422,16 @@ index 000000000000..9cc6bfd77514
 + * demand exactly, one with none is censored.
 + *
 + * Per CPU, H is the envelope of D -- it jumps to D at once and decays at
-+ * PELT's pace -- and N the decayed running time. They give p, the chance
-+ * the CPU is behind: 1 after a censored interval, alpha / (N + alpha)
-+ * otherwise. p picks a speed floor s*(p * lambda) from a table built once
++ * PELT's pace -- and it gives p, the chance the CPU is behind: the demand
++ * measured so far, or 1 after an interval with no idle in it, which is
++ * censored. p picks a speed floor s*(p * lambda) from a table built once
 + * per policy.
++ *
++ * p used to be alpha / (N + alpha) over N, the decayed running time, which
++ * tops out when N has decayed away -- a CPU that had done a single tick of
++ * work took the top of the table, and since cpufreq_update_util() is not
++ * called on the way into idle, nothing brought the frequency back down.
++ * H is measured demand on the same scale, so it is p directly.
 + */
 +
 +/*
@@ -479,12 +481,6 @@ index 000000000000..9cc6bfd77514
 +				    dw),
 +			  cpufreq_pelt_decay(sg_cpu->H, dw * NSEC_PER_USEC));
 +
-+	/*
-+	 * N gains the running time and decays like PELT; the running is taken
-+	 * to come first, as when the CPU ends an interval in nohz idle.
-+	 */
-+	sg_cpu->N = cpufreq_pelt_decay(sg_cpu->N, dw * NSEC_PER_USEC) +
-+		    cpufreq_pelt_decay(dw - di, di * NSEC_PER_USEC);
 +	sg_cpu->censored = !di;
 +
 +	sg_cpu->last_sample = time;
@@ -712,14 +708,37 @@ index 000000000000..9cc6bfd77514
 +	struct smut_policy *sg_policy = sg_cpu->sg_policy;
 +	unsigned int floor, k = SMUT_FLOOR_N - 1;
 +
-+	if (!smut_active(sg_cpu))
++	/*
++	 * No measured demand means no work to be behind, so an idle CPU
++	 * takes no floor and can settle at policy->min.
++	 *
++	 * The case the floor exists for is unaffected: a saturated CPU has
++	 * D = capacity, so H is full and the gate opens.
++	 */
++	if (!smut_active(sg_cpu) || !sg_cpu->H)
 +		return 0;
 +
-+	if (!sg_cpu->censored) {
-+		unsigned int alpha = sg_policy->alpha_us, den = sg_cpu->N + alpha;
++	/*
++	 * p is the demand the CPU has actually been shown to have, so a
++	 * lightly loaded CPU takes a floor in proportion to the work it
++	 * has.
++	 *
++	 * It used to be alpha / (N + alpha) over N, the running time seen
++	 * lately, which tops out when N has decayed away: a CPU that had
++	 * done nothing but a single tick of work took the top of the floor
++	 * table, and since cpufreq_update_util() is not called on the way
++	 * into idle, nothing ever brought the frequency back down.  H is
++	 * measured demand in PELT's units already, so it is p directly, and
++	 * the two are on the same scale -- D is capacity-scaled, so H over
++	 * the CPU's own capacity is a fraction every cluster agrees on.
++	 *
++	 * An interval with no idle in it is censored: whatever the frequency
++	 * was, the CPU was busy throughout, and it keeps the top of the
++	 * table.
++	 */
++	if (!sg_cpu->censored)
++		k = (k * sg_cpu->H + max_cap / 2) / max_cap;
 +
-+		k = (k * alpha + den / 2) / den;
-+	}
 +	floor = READ_ONCE(sg_policy->floor[k]);
 +
 +	if (sg_cpu->bw_max < max_cap)
