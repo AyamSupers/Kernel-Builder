@@ -1,16 +1,16 @@
-From 7b494b7ea02c43c898ce303b8afb3be112ec8718 Mon Sep 17 00:00:00 2001
+From cb6ff279ce92290e9655373a6decca2e706c761e Mon Sep 17 00:00:00 2001
 From: Artecxyz <artecxyz@local>
-Date: Wed, 28 Oct 2026 13:55:44 +0700
+Date: Thu, 29 Oct 2026 10:02:30 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.1.0
 
 ---
  drivers/cpufreq/Kconfig             |   36 +
  drivers/cpufreq/Makefile            |    1 +
- drivers/cpufreq/cpufreq_smartutil.c | 1623 +++++++++++++++++++++++++++
+ drivers/cpufreq/cpufreq_smartutil.c | 1635 +++++++++++++++++++++++++++
  include/linux/sched/cpufreq.h       |   11 +
  kernel/sched/cpufreq_schedutil.c    |   15 +
  kernel/sched/pelt.c                 |   14 +
- 6 files changed, 1700 insertions(+)
+ 6 files changed, 1712 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
@@ -81,10 +81,10 @@ index e2657bf89735..9efcb6dd7a43 100644
  obj-$(CONFIG_CPUFREQ_DT_PLATDEV)	+= cpufreq-dt-platdev.o
 diff --git a/drivers/cpufreq/cpufreq_smartutil.c b/drivers/cpufreq/cpufreq_smartutil.c
 new file mode 100644
-index 000000000000..e8d94cdb2b46
+index 000000000000..99c5ce88c317
 --- /dev/null
 +++ b/drivers/cpufreq/cpufreq_smartutil.c
-@@ -0,0 +1,1623 @@
+@@ -0,0 +1,1635 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil CPUFreq governor (based on schedutil)
@@ -432,6 +432,9 @@ index 000000000000..e8d94cdb2b46
 + * work took the top of the table, and since cpufreq_update_util() is not
 + * called on the way into idle, nothing brought the frequency back down.
 + * H is measured demand on the same scale, so it is p directly.
++ *
++ * D is on PELT's scale, so H is comparable with util and uclamp_max; see
++ * smut_sample() for the scaling that gets it there.
 + */
 +
 +/*
@@ -468,17 +471,26 @@ index 000000000000..e8d94cdb2b46
 +	 * D = busy * freq_scale * capacity, in PELT's units.
 +	 *
 +	 * get_cpu_idle_time() reports microseconds, so (dw - di) / dw is
-+	 * already the busy fraction and only has to be scaled by the
-+	 * frequency ratio and the CPU's capacity.  Dividing by dw alone
-+	 * keeps D on PELT's 0..1024 scale; scaling dw by SCHED_CAPACITY_SHIFT
-+	 * here as well would shrink it by 1024 and leave H, and with it the
-+	 * whole measured-demand path, unable to leave PELT's shadow.
++	 * already the busy fraction.  The two factors are not on PELT's
++	 * scale yet, though: topology_get_freq_scale() is f_curr / f_max in
++	 * SCHED_CAPACITY_SCALE units -- it reaches 1024, it is not
++	 * pre-shifted -- and arch_scale_cpu_capacity() is the CPU's own
++	 * capacity, so their product reaches SCHED_CAPACITY_SCALE^2 and has
++	 * to come back down by SCHED_CAPACITY_SHIFT.  That is what the
++	 * dw << SCHED_CAPACITY_SHIFT divisor does: it is dw scaled once, not
++	 * dw scaled twice over.
++	 *
++	 * Dividing by dw alone instead leaves D, and with it H, 1024 times
++	 * too large, and H then saturates every comparison it enters:
++	 * min(H, uclamp_max) collapses to uclamp_max and the floor's k
++	 * collapses to SMUT_FLOOR_N - 1, so the clusters sit at their tier
++	 * ceiling no matter what the load is.
 +	 */
 +	sg_cpu->H = max_t(unsigned long,
 +			  div64_u64((dw - di) *
 +				    topology_get_freq_scale(sg_cpu->cpu) *
 +				    arch_scale_cpu_capacity(sg_cpu->cpu),
-+				    dw),
++				    dw << SCHED_CAPACITY_SHIFT),
 +			  cpufreq_pelt_decay(sg_cpu->H, dw * NSEC_PER_USEC));
 +
 +	sg_cpu->censored = !di;
