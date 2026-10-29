@@ -1,31 +1,30 @@
-From d6190b2d501324c8f9c22b2cc6d3269fe74333a8 Mon Sep 17 00:00:00 2001
+From 22c57d7c31918595b48c3d5d969af203f4f289c0 Mon Sep 17 00:00:00 2001
 From: Artecxyz <artecxyz@local>
-Date: Thu, 29 Oct 2026 10:18:18 +0700
+Date: Thu, 29 Oct 2026 10:40:14 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.1.0
 
 ---
- drivers/cpufreq/Kconfig             |   26 +
+ drivers/cpufreq/Kconfig             |   25 +
  drivers/cpufreq/Makefile            |    1 +
  drivers/cpufreq/cpufreq_smartutil.c | 1628 +++++++++++++++++++++++++++
  include/linux/sched/cpufreq.h       |   11 +
  kernel/sched/cpufreq_schedutil.c    |   15 +
  kernel/sched/pelt.c                 |   14 +
- 6 files changed, 1695 insertions(+)
+ 6 files changed, 1694 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
-index a1b82168a942..7a35f737063d 100644
+index a1b82168a942..dc9c0311bf48 100644
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -210,6 +210,32 @@ config CPU_FREQ_GOV_SCHEDUTIL
+@@ -210,6 +210,31 @@ config CPU_FREQ_GOV_SCHEDUTIL
  
  	  If in doubt, say N.
  
 +config CPU_FREQ_GOV_SMARTUTIL
 +	bool "'smartutil' cpufreq policy governor"
-+	depends on CPU_FREQ && SMP
++	depends on CPU_FREQ && SMP && CPU_FREQ_GOV_SCHEDUTIL
 +	select CPU_FREQ_GOV_ATTR_SET
-+	select CPU_FREQ_GOV_SCHEDUTIL
 +	select IRQ_WORK
 +	help
 +	  This governor is schedutil, standalone and with its own tunables,
