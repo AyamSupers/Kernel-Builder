@@ -295,8 +295,6 @@ jobs:
               set_config CONFIG_KSU_SUSFS_TRY_UMOUNT y
               ;;
           esac
-          set_config CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL y
-          sed -i '/^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=/d' "$DEFCONFIG"
           sed -i 's/check_defconfig//' "$KERNEL_ROOT/build.config.gki" 2>/dev/null || true
           echo "Kernel configs enabled in $KERNEL_DEFCONFIG"
           
