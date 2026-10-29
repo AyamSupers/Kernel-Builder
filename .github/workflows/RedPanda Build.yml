@@ -235,12 +235,12 @@ jobs:
           cp susfs4ksu/kernel_patches/fs/* ./fs/
           cp susfs4ksu/kernel_patches/include/linux/* ./include/linux/
           cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.6.patch ./
-          cp susfs4ksu/kernel_patches/55_selinux_hook_hide_susfs_artifacts.patch ./
-          cp susfs4ksu/kernel_patches/56_selinuxfs_hide_sensitive_av.patch ./
+          # cp susfs4ksu/kernel_patches/55_selinux_hook_hide_susfs_artifacts.patch ./
+          # cp susfs4ksu/kernel_patches/56_selinuxfs_hide_sensitive_av.patch ./
           
           patch -p1 < 50_add_susfs_in_gki-android15-6.6.patch || true
-          patch -p1 < 55_selinux_hook_hide_susfs_artifacts.patch || true
-          patch -p1 < 56_selinuxfs_hide_sensitive_av.patch || true
+          # patch -p1 < 55_selinux_hook_hide_susfs_artifacts.patch || true
+          # patch -p1 < 56_selinuxfs_hide_sensitive_av.patch || true
           if grep -q "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))" fs/proc/task_mmu.c 2>/dev/null; then
             echo "✅ SUSFS setup complete"
           else
