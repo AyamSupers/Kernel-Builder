@@ -222,10 +222,8 @@ jobs:
         working-directory: kernel_workspace
         run: |
           patch -p1 < $GITHUB_WORKSPACE/patches/0001-linux6.6.144-smartutil-v0.1.0.patch
-          sed -i 's|^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y$|# CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL is not set|' ./arch/arm64/configs/$KERNEL_DEFCONFIG
           cat >> arch/arm64/configs/$KERNEL_DEFCONFIG << 'EOF'
           CONFIG_CPU_FREQ_GOV_SMARTUTIL=y
-          CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL=y
           EOF
           echo "✅ New Scheduler"
           
