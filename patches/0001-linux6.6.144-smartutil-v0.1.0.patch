@@ -1,16 +1,16 @@
-From c5000baa28b3cc8505ab04d7e6fa6f5d3e0df840 Mon Sep 17 00:00:00 2001
+From 5032d94bbe595b9c6c18b760e44d6c6548931c8f Mon Sep 17 00:00:00 2001
 From: Artecxyz <artecxyz@local>
-Date: Thu, 29 Oct 2026 11:49:38 +0700
+Date: Thu, 29 Oct 2026 15:26:45 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.1.0
 
 ---
  drivers/cpufreq/Kconfig             |   35 +
  drivers/cpufreq/Makefile            |    1 +
- drivers/cpufreq/cpufreq_smartutil.c | 1635 +++++++++++++++++++++++++++
+ drivers/cpufreq/cpufreq_smartutil.c | 1641 +++++++++++++++++++++++++++
  include/linux/sched/cpufreq.h       |   11 +
  kernel/sched/cpufreq_schedutil.c    |   15 +
  kernel/sched/pelt.c                 |   14 +
- 6 files changed, 1711 insertions(+)
+ 6 files changed, 1717 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
@@ -80,10 +80,10 @@ index e2657bf89735..9efcb6dd7a43 100644
  obj-$(CONFIG_CPUFREQ_DT_PLATDEV)	+= cpufreq-dt-platdev.o
 diff --git a/drivers/cpufreq/cpufreq_smartutil.c b/drivers/cpufreq/cpufreq_smartutil.c
 new file mode 100644
-index 000000000000..99c5ce88c317
+index 000000000000..7eada99c01f3
 --- /dev/null
 +++ b/drivers/cpufreq/cpufreq_smartutil.c
-@@ -0,0 +1,1635 @@
+@@ -0,0 +1,1641 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil CPUFreq governor (based on schedutil)
@@ -1473,20 +1473,11 @@ index 000000000000..99c5ce88c317
 +{
 +	struct smut_policy *sg_policy;
 +	struct smut_tunables *tunables;
-+	static bool banner_printed;
 +	int ret = 0;
 +
 +	/* State should be equivalent to EXIT */
 +	if (policy->governor_data)
 +		return -EBUSY;
-+
-+	if (!banner_printed) {
-+		banner_printed = true;
-+		pr_info("%s %s by %s\n",
-+			CPUFREQ_SMARTUTIL_PROGNAME,
-+			CPUFREQ_SMARTUTIL_VERSION,
-+			CPUFREQ_SMARTUTIL_AUTHOR);
-+	}
 +
 +	cpufreq_enable_fast_switch(policy);
 +
@@ -1714,7 +1705,22 @@ index 000000000000..99c5ce88c317
 +}
 +#endif
 +
-+cpufreq_governor_init(smartutil_gov);
++/*
++ * Register the governor explicitly rather than through the
++ * cpufreq_governor_init() macro, so the banner prints at registration time.
++ * Printed from smut_init() instead it only appeared once some policy
++ * actually started using the governor, which made a kernel with smartutil
++ * compiled in but booted on something else look identical to one without
++ * it at all.  Same core_initcall level the macro would have used; only the
++ * banner moves.
++ */
++static int __init smut_gov_init(void)
++{
++	pr_info("%s %s by %s\n", CPUFREQ_SMARTUTIL_PROGNAME,
++		CPUFREQ_SMARTUTIL_VERSION, CPUFREQ_SMARTUTIL_AUTHOR);
++	return cpufreq_register_governor(&smartutil_gov);
++}
++core_initcall(smut_gov_init);
 +
 +MODULE_AUTHOR(CPUFREQ_SMARTUTIL_AUTHOR);
 +MODULE_LICENSE("GPL");
