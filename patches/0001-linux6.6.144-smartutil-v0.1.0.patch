@@ -1,47 +1,31 @@
-From cb6ff279ce92290e9655373a6decca2e706c761e Mon Sep 17 00:00:00 2001
+From d6190b2d501324c8f9c22b2cc6d3269fe74333a8 Mon Sep 17 00:00:00 2001
 From: Artecxyz <artecxyz@local>
-Date: Thu, 29 Oct 2026 10:02:30 +0700
+Date: Thu, 29 Oct 2026 10:18:18 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.1.0
 
 ---
- drivers/cpufreq/Kconfig             |   36 +
+ drivers/cpufreq/Kconfig             |   26 +
  drivers/cpufreq/Makefile            |    1 +
- drivers/cpufreq/cpufreq_smartutil.c | 1635 +++++++++++++++++++++++++++
+ drivers/cpufreq/cpufreq_smartutil.c | 1628 +++++++++++++++++++++++++++
  include/linux/sched/cpufreq.h       |   11 +
  kernel/sched/cpufreq_schedutil.c    |   15 +
  kernel/sched/pelt.c                 |   14 +
- 6 files changed, 1712 insertions(+)
+ 6 files changed, 1695 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
-index a1b82168a942..d35157f541ad 100644
+index a1b82168a942..7a35f737063d 100644
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -112,6 +112,16 @@ config CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
- 	  have a look at the help section of that governor. The fallback
- 	  governor will be 'performance'.
- 
-+config CPU_FREQ_DEFAULT_GOV_SMARTUTIL
-+	bool "smartutil"
-+	depends on SMP
-+	select CPU_FREQ_GOV_SMARTUTIL
-+	select CPU_FREQ_GOV_SCHEDUTIL
-+	help
-+	  Use the 'smartutil' CPUFreq governor by default. This governor is a
-+	  standalone variant of 'schedutil' with its own tunables. If unsure,
-+	  have a look at the help section of that governor.
-+
- endchoice
- 
- config CPU_FREQ_GOV_PERFORMANCE
-@@ -210,6 +220,32 @@ config CPU_FREQ_GOV_SCHEDUTIL
+@@ -210,6 +210,32 @@ config CPU_FREQ_GOV_SCHEDUTIL
  
  	  If in doubt, say N.
  
 +config CPU_FREQ_GOV_SMARTUTIL
 +	bool "'smartutil' cpufreq policy governor"
-+	depends on CPU_FREQ && SMP && CPU_FREQ_GOV_SCHEDUTIL
++	depends on CPU_FREQ && SMP
 +	select CPU_FREQ_GOV_ATTR_SET
++	select CPU_FREQ_GOV_SCHEDUTIL
 +	select IRQ_WORK
 +	help
 +	  This governor is schedutil, standalone and with its own tunables,
@@ -51,9 +35,8 @@ index a1b82168a942..d35157f541ad 100644
 +	  least max(min_rate_limit_ns, 1 tick) and measures the work done
 +	  over one: an interval with idle shows the demand exactly, one
 +	  without any is known only to be behind.  H is the envelope of that
-+	  demand, rising at once and decaying like PELT, and with N, the
-+	  running time seen lately, gives p, the probability the CPU is
-+	  behind its work.
++	  demand, rising at once and decaying like PELT, and it is p, the
++	  probability the CPU is behind its work.
 +
 +	  The request is util = max(PELT, H) capped by uclamp_max, mapped to
 +	  frequency with per-tier headroom and ceilings, and floored at
@@ -81,10 +64,10 @@ index e2657bf89735..9efcb6dd7a43 100644
  obj-$(CONFIG_CPUFREQ_DT_PLATDEV)	+= cpufreq-dt-platdev.o
 diff --git a/drivers/cpufreq/cpufreq_smartutil.c b/drivers/cpufreq/cpufreq_smartutil.c
 new file mode 100644
-index 000000000000..99c5ce88c317
+index 000000000000..fa4ba88dcde7
 --- /dev/null
 +++ b/drivers/cpufreq/cpufreq_smartutil.c
-@@ -0,0 +1,1635 @@
+@@ -0,0 +1,1628 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil CPUFreq governor (based on schedutil)
@@ -1707,13 +1690,6 @@ index 000000000000..99c5ce88c317
 +	.stop			= smut_stop,
 +	.limits			= smut_limits,
 +};
-+
-+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_SMARTUTIL
-+struct cpufreq_governor *cpufreq_default_governor(void)
-+{
-+	return &smartutil_gov;
-+}
-+#endif
 +
 +cpufreq_governor_init(smartutil_gov);
 +
