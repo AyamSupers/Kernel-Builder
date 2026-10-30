@@ -221,7 +221,7 @@ jobs:
         if: inputs.schednew
         working-directory: kernel_workspace
         run: |
-          patch -p1 < $GITHUB_WORKSPACE/patches/0001-linux6.6.144-smartutil-v0.2.0.patch
+          patch -p1 < $GITHUB_WORKSPACE/patches/0001-linux6.6.144-smartutil-v0.3.0.patch
           cat >> arch/arm64/configs/$KERNEL_DEFCONFIG << 'EOF'
           CONFIG_CPU_FREQ_GOV_SMARTUTIL=y
           EOF
