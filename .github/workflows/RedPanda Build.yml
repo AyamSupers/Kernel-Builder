@@ -188,7 +188,7 @@ jobs:
             echo "VARIANT_VERSION_DISPLAY=${VARIANT_VERSION_DISPLAY}" >> $GITHUB_ENV
             echo "✅ BakaSU ${VARIANT_VERSION_DISPLAY}"
 
-            MM_PATCH="$GITHUB_WORKSPACE/patches/more_multi_manager.patch"
+            MM_PATCH="$GITHUB_WORKSPACE/patches/mambosu_uapi_full.patch"
             if [ -f "$MM_PATCH" ]; then
               patch -p1 -F 3 < "$MM_PATCH"
               echo "✅ Add More Multi-Manager List"
