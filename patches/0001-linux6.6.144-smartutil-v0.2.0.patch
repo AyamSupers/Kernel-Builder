@@ -1,23 +1,23 @@
-From 9215fc478905f71efc0d946a700122e3d0518db5 Mon Sep 17 00:00:00 2001
+From 437ecf88655bf6b405eb76516228ebaa88981503 Mon Sep 17 00:00:00 2001
 From: Artecxyz <artecxyz@local>
-Date: Thu, 29 Oct 2026 23:35:52 +0700
+Date: Fri, 30 Oct 2026 11:24:49 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.2.0
 
 ---
- drivers/cpufreq/Kconfig             |   25 +
+ drivers/cpufreq/Kconfig             |   27 +
  drivers/cpufreq/Makefile            |    1 +
- drivers/cpufreq/cpufreq_smartutil.c | 1718 +++++++++++++++++++++++++++
+ drivers/cpufreq/cpufreq_smartutil.c | 1711 +++++++++++++++++++++++++++
  include/linux/sched/cpufreq.h       |   11 +
  kernel/sched/cpufreq.c              |   13 +
  kernel/sched/pelt.c                 |   14 +
- 6 files changed, 1782 insertions(+)
+ 6 files changed, 1777 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
-index a1b82168a942..5f7a89359b50 100644
+index a1b82168a942..3083ae539c96 100644
 --- a/drivers/cpufreq/Kconfig
 +++ b/drivers/cpufreq/Kconfig
-@@ -210,6 +210,31 @@ config CPU_FREQ_GOV_SCHEDUTIL
+@@ -210,6 +210,33 @@ config CPU_FREQ_GOV_SCHEDUTIL
  
  	  If in doubt, say N.
  
@@ -34,8 +34,10 @@ index a1b82168a942..5f7a89359b50 100644
 +	  least max(min_rate_limit_ns, 1 tick) and measures the work done
 +	  over one: an interval with idle shows the demand exactly, one
 +	  without any is known only to be behind.  H is the envelope of that
-+	  demand, rising at once and decaying like PELT, and it is p, the
-+	  probability the CPU is behind its work.
++	  demand, rising at once and decaying like PELT, and it is what the
++	  request uses in place of PELT.  p, the probability the CPU is behind
++	  its work, is a leaky integrator of those censored intervals, and it
++	  is what the speed floor uses.
 +
 +	  The request is util = max(PELT, H) capped by uclamp_max, mapped to
 +	  frequency with per-tier headroom and ceilings, and floored at
@@ -63,10 +65,10 @@ index e2657bf89735..9efcb6dd7a43 100644
  obj-$(CONFIG_CPUFREQ_DT_PLATDEV)	+= cpufreq-dt-platdev.o
 diff --git a/drivers/cpufreq/cpufreq_smartutil.c b/drivers/cpufreq/cpufreq_smartutil.c
 new file mode 100644
-index 000000000000..b8da4bf85263
+index 000000000000..eee3eaa6a111
 --- /dev/null
 +++ b/drivers/cpufreq/cpufreq_smartutil.c
-@@ -0,0 +1,1718 @@
+@@ -0,0 +1,1711 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil CPUFreq governor (based on schedutil)
@@ -79,8 +81,10 @@ index 000000000000..b8da4bf85263
 + * max(min_rate_limit_ns, 1 tick) and measures the work done over one,
 + * D = busy * freq_scale * capacity, from kcpustat's idle time: an
 + * interval with idle shows the demand exactly, one with none is censored.
-+ * H is the envelope of D, rising at once and decaying like PELT; it gives
-+ * p, the probability the CPU is behind its work.
++ * H is the envelope of D, rising at once and decaying like PELT.  p, the
++ * probability the CPU is behind its work, comes from the censored
++ * intervals alone -- how much work there is and how late the CPU is are
++ * different questions, and only the second one belongs to the floor.
 + *
 + * The request is util = max(PELT, H) capped by uclamp_max, mapped to
 + * frequency with per-tier headroom and ceilings, and floored at
@@ -244,14 +248,21 @@ index 000000000000..b8da4bf85263
 +	u64			last_idle;	/* kcpustat, us */
 +	unsigned long	H;		/* envelope of measured demand */
 +	/*
-+	 * How many of the recent intervals closed with no idle at all,
-+	 * raised by one per such interval and lowered by one per interval
-+	 * with idle in it.  An interval with no idle is censored -- H is
-+	 * then a lower bound on the demand, not the demand -- and a run of
-+	 * them says the CPU is behind its work, so the floor is lifted in
-+	 * proportion to the run.
++	 * p, the probability this CPU is behind its work, per mille.
++	 *
++	 * A leaky integrator of the censored indicator: an interval with no
++	 * idle in it at all pushes p a sixteenth of the way towards 1, an
++	 * interval with idle in it lets a sixteenth of p drain away.  So a
++	 * run of idle-free intervals is needed to move it and a run of the
++	 * other kind to bring it back, about 64 ms either way.
++	 *
++	 * Kept apart from H on purpose.  H is how much work the CPU has been
++	 * shown to have and it belongs to the request, where replacing PELT
++	 * is its job.  p is only how late the CPU is: a CPU keeping up under
++	 * a heavy load is not behind and must take no floor for it, while a
++	 * CPU falling behind on light work is behind and must take one.
 +	 */
-+	unsigned int	censored_run;
++	unsigned int	behind;
 +};
 +
 +static DEFINE_PER_CPU(struct smut_cpu, smut_cpu);
@@ -412,17 +423,21 @@ index 000000000000..b8da4bf85263
 + * demand exactly, one with none is censored.
 + *
 + * Per CPU, H is the envelope of D -- it jumps to D at once and decays at
-+ * PELT's pace -- and it gives p, the chance the CPU is behind: the demand
-+ * measured so far, lifted by however many recent intervals closed with no
-+ * idle in them, since those are censored and only bound the demand from
-+ * below. p picks a speed floor s*(p * lambda) from a table built once per
-+ * policy.
++ * PELT's pace -- and p is the chance the CPU is behind: a leaky integrator
++ * of the censored indicator, since those intervals only bound the demand
++ * from below.  p picks a speed floor s*(p * lambda) from a table built once
++ * per policy.
 + *
 + * p used to be alpha / (N + alpha) over N, the decayed running time, which
 + * tops out when N has decayed away -- a CPU that had done a single tick of
 + * work took the top of the table, and since cpufreq_update_util() is not
 + * called on the way into idle, nothing brought the frequency back down.
-+ * H is measured demand on the same scale, so it is p directly.
++ * H replaced that, which is right about the scale and wrong about the
++ * question: H is how much work there is, and a CPU keeping up under a heavy
++ * load has plenty of it while not being behind at all.  Worse, a saturated
++ * CPU measures D = busy * f_curr / f_max * capacity, so H over capacity is
++ * the frequency the previous update already chose -- the floor became a
++ * function of its own output.
 + *
 + * D is on PELT's scale, so H is comparable with util and uclamp_max; see
 + * smut_sample() for the scaling that gets it there.
@@ -487,24 +502,22 @@ index 000000000000..b8da4bf85263
 +	/*
 +	 * An interval with no idle in it is censored: whatever the frequency
 +	 * was, the CPU was busy throughout, so D -- and with it H -- is a
-+	 * lower bound on the demand rather than the demand itself.  One such
-+	 * interval means little, a tick without idle is ordinary on a CPU
-+	 * that is keeping up; a run of them means the CPU is behind.
++	 * lower bound on the demand rather than the demand itself.  It is
++	 * also the only evidence there is of a CPU falling behind, so it
++	 * feeds p and nothing else.
 +	 *
-+	 * So the run length is kept and graded, one step per interval in
-+	 * either direction.  What this replaces was a flag, and smut_floor()
-+	 * read it as "the top of the table", which is a cliff of 12% of
-+	 * fmax on the very first idle-free interval.  Whether a CPU gets any
-+	 * idle at all depends on the frequency it is already running at, so
-+	 * a CPU hovering at the edge of keeping up flipped the flag every
-+	 * sample and the floor followed it up and down.
++	 * One idle-free interval means little -- a tick without idle is
++	 * ordinary on a CPU that is keeping up -- so p integrates instead of
++	 * following.  A run counter would be cheaper and is what was here
++	 * before, but it is a step function of how many intervals happen to
++	 * have fallen idle-free, and a CPU sitting on the edge of keeping up
++	 * flips the indicator every sample, so the run count flickers and
++	 * the floor followed it up and down.
 +	 */
-+	if (!di) {
-+		if (sg_cpu->censored_run < SMUT_FLOOR_N)
-+			sg_cpu->censored_run++;
-+	} else if (sg_cpu->censored_run) {
-+		sg_cpu->censored_run--;
-+	}
++	if (!di)
++		sg_cpu->behind += (1024 - sg_cpu->behind) >> 4;
++	else if (sg_cpu->behind)
++		sg_cpu->behind -= sg_cpu->behind >> 4;
 +	sg_cpu->last_sample = time;
 +	sg_cpu->last_wall = wall;
 +	sg_cpu->last_idle = idle;
@@ -741,38 +754,21 @@ index 000000000000..b8da4bf85263
 +		return 0;
 +
 +	/*
-+	 * p is the demand the CPU has actually been shown to have, so a
-+	 * lightly loaded CPU takes a floor in proportion to the work it
-+	 * has.
++	 * p is how late the CPU is, not how much work it has.  H answers the
++	 * second question and stays in the request, where replacing PELT is
++	 * its job; taking the floor from it as well made the floor a
++	 * function of the CPU's own output.  A saturated CPU measures
++	 * D = busy * f_curr / f_max * capacity, so H over the CPU's capacity
++	 * is f_curr / f_max -- the frequency the last update chose.  The
++	 * floor then rose with it, a loop no load could talk down, and it
++	 * only ever came back under policy->min once H dropped below a sixth
++	 * of capacity, so a lightly loaded CPU could not settle low.
 +	 *
-+	 * It used to be alpha / (N + alpha) over N, the running time seen
-+	 * lately, which tops out when N has decayed away: a CPU that had
-+	 * done nothing but a single tick of work took the top of the floor
-+	 * table, and since cpufreq_update_util() is not called on the way
-+	 * into idle, nothing ever brought the frequency back down.  H is
-+	 * measured demand in PELT's units already, so it is p directly, and
-+	 * the two are on the same scale -- D is capacity-scaled, so H over
-+	 * the CPU's own capacity is a fraction every cluster agrees on.
++	 * The model only ever had the lateness in it anyway: behind with
++	 * probability p, a unit of work costs (P(s) + p * lambda) / s, and
++	 * p is the chance of being late, not the amount of work.
 +	 */
-+	k = ((SMUT_FLOOR_N - 1) * sg_cpu->H + max_cap / 2) / max_cap;
-+	/*
-+	 * An interval with no idle in it is censored: whatever the frequency
-+	 * was, the CPU was busy throughout, so H is a lower bound on the
-+	 * demand rather than the demand itself.  The longer the run of them,
-+	 * the further behind the CPU is, and the higher the floor it takes --
-+	 * one step of the table per interval, up to the top, which is where a
-+	 * CPU that has been saturated for a long time ends up, exactly as
-+	 * before.
-+	 *
-+	 * The run length is what makes this continuous.  A flag read as "the
-+	 * top of the table" put a cliff of 12% of fmax on the first idle-free
-+	 * interval, and since whether a CPU gets any idle at all depends on
-+	 * the frequency it is already running at, the operating point of any
-+	 * busy CPU sits on that cliff and crosses it constantly.
-+	 */
-+	if (sg_cpu->censored_run)
-+		k = min_t(unsigned int, k + sg_cpu->censored_run,
-+			  SMUT_FLOOR_N - 1);
++	k = ((SMUT_FLOOR_N - 1) * sg_cpu->behind + 512) >> 10;
 +
 +	floor = READ_ONCE(sg_policy->floor[k]);
 +
@@ -1778,7 +1774,6 @@ index 000000000000..b8da4bf85263
 +	.stop			= smut_stop,
 +	.limits			= smut_limits,
 +};
-+
 +
 +cpufreq_governor_init(smartutil_gov);
 +
