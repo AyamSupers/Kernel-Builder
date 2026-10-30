@@ -1,0 +1,228 @@
+diff --git a/kernel/Kbuild b/kernel/Kbuild
+index ef9b1379..67f22951 100644
+--- a/kernel/Kbuild
++++ b/kernel/Kbuild
+@@ -99,7 +99,7 @@ ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
+ ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
+ 
+ ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
+-$(info -- Supported Managers: KernelSU Official, KOWSU, BakaSU )
++$(info -- Supported Managers: KernelSU Official, KOWSU, BakaSU, MamboSU, FinaSU, KernelSU-Next)
+ endif
+ 
+ KERNEL_VERSION := $(VERSION).$(PATCHLEVEL)
+diff --git a/kernel/manager/apk_sign.c b/kernel/manager/apk_sign.c
+index eba496d5..8a8ee005 100644
+--- a/kernel/manager/apk_sign.c
++++ b/kernel/manager/apk_sign.c
+@@ -31,16 +31,22 @@ struct sdesc {
+     char ctx[];
+ };
+ 
++// Every fork that tracks upstream needs no entry: 0 means "report the kernel's
++// own KERNEL_SU_UAPI_VERSION". Only a fork that lags behind gets an explicit
++// number, and that number is dropped again once it catches up.
+ static apk_sign_key_t apk_sign_keys[] = {
+-    { EXPECTED_SIZE_BAKASU, EXPECTED_HASH_BAKASU }, /* Baka-SU/BakaSU */
++    { EXPECTED_SIZE_BAKASU, EXPECTED_HASH_BAKASU, 0 }, /* Baka-SU/BakaSU */
+ #ifdef CONFIG_KSU_MULTI_MANAGER_SUPPORT
+-    { EXPECTED_SIZE_OFFICIAL, EXPECTED_HASH_OFFICIAL }, // tiann/KernelSU
+-    { EXPECTED_SIZE_KOWX712, EXPECTED_HASH_KOWX712 }, // KOWX712/KernelSU
++    { EXPECTED_SIZE_OFFICIAL, EXPECTED_HASH_OFFICIAL, 0 }, // tiann/KernelSU
++    { EXPECTED_SIZE_KOWX712, EXPECTED_HASH_KOWX712, 0 }, // KOWX712/KernelSU
++    { EXPECTED_SIZE_KSUNEXT, EXPECTED_HASH_KSUNEXT, 0 }, // rifsxd/KernelSU-Next
++    { EXPECTED_SIZE_MAMBOSU, EXPECTED_HASH_MAMBOSU, 5 }, // RapliVx/MamboSU: still on UAPI 5
++    { EXPECTED_SIZE_FINASU, EXPECTED_HASH_FINASU, 0 }, // LyraVoid/FinaSU
+ #ifdef EXPECTED_SIZE
+-    { EXPECTED_SIZE, EXPECTED_HASH }, // Custom
++    { EXPECTED_SIZE, EXPECTED_HASH, 0 }, // Custom
+ #endif
+ #ifdef EXPECTED_PR_BUILD_SIZE
+-    { EXPECTED_PR_BUILD_SIZE, EXPECTED_PR_BUILD_HASH }, // Custom 2 (For PR build)
++    { EXPECTED_PR_BUILD_SIZE, EXPECTED_PR_BUILD_HASH, 0 }, // Custom 2 (For PR build)
+ #endif
+ #endif
+ };
+@@ -182,6 +188,28 @@ static bool check_block(struct file *fp, loff_t *pos, loff_t block_end, u8 *matc
+     return signature_valid;
+ }
+ 
++/**
++ * ksu_manager_uapi_version - UAPI version a manager build was compiled against.
++ * @signature_index: index into apk_sign_keys[], or one of the reserved
++ *                   KSU_SIGNATURE_INDEX_* values.
++ *
++ * Managers compare the uapi_version reported by KSU_IOCTL_GET_INFO against the
++ * KERNEL_SU_UAPI_VERSION they were built with, and hide the root-only screens
++ * when they differ. Reporting a single global version therefore breaks every
++ * manager that lags behind the kernel.
++ *
++ * 0 means "follow the kernel": report KERNEL_SU_UAPI_VERSION. That is the right
++ * answer for any fork that tracks upstream, and also for the reserved indices
++ * (dynamic manager, ksu debug manager, toolkit manager).
++ */
++unsigned ksu_manager_uapi_version(u8 signature_index)
++{
++    if (signature_index >= ARRAY_SIZE(apk_sign_keys))
++        return 0;
++
++    return apk_sign_keys[signature_index].uapi_version;
++}
++
+ struct zip_entry_header {
+     uint32_t signature;
+     uint16_t version;
+diff --git a/kernel/manager/apk_sign.h b/kernel/manager/apk_sign.h
+index a5ae39ab..cd54d71b 100644
+--- a/kernel/manager/apk_sign.h
++++ b/kernel/manager/apk_sign.h
+@@ -9,4 +9,8 @@ int get_pkg_from_apk_path(char *pkg, const char *path);
+ 
+ bool is_dynamic_manager_apk(char *path, int *signature_index);
+ 
++// UAPI version the manager with this signature index was compiled against.
++// 0 means "follow the kernel": the caller reports KERNEL_SU_UAPI_VERSION.
++unsigned ksu_manager_uapi_version(u8 signature_index);
++
+ #endif
+\ No newline at end of file
+diff --git a/kernel/manager/manager.c b/kernel/manager/manager.c
+index 793469e5..73e8162d 100644
+--- a/kernel/manager/manager.c
++++ b/kernel/manager/manager.c
+@@ -3,6 +3,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/cred.h>
+ #include <linux/sched.h>
++#include "manager/apk_sign.h"
+ #include "manager_identity.h"
+ #include "ksu.h"
+ #include "uapi/supercall.h"
+@@ -13,6 +14,7 @@ u16 ksu_last_manager_appid = KSU_INVALID_APPID;
+ struct ksu_manager_node {
+     u8 signature_index;
+     u16 appid;
++    unsigned uapi_version;
+     struct list_head list;
+     struct rcu_head rcu;
+ };
+@@ -65,6 +67,7 @@ void ksu_register_manager(u32 uid, u8 signature_index)
+ 
+     node->appid = appid;
+     node->signature_index = signature_index;
++    node->uapi_version = ksu_manager_uapi_version(signature_index);
+ 
+     spin_lock(&ksu_manager_list_write_lock);
+ 
+@@ -221,3 +224,37 @@ int ksu_get_manager_signature_index_by_appid(u16 appid)
+     rcu_read_unlock();
+     return -ENODATA;
+ }
++
++/**
++ * ksu_current_manager_uapi_version - UAPI version to report to the calling manager.
++ *
++ * Resolves the UAPI version of the manager that is currently talking to us, so
++ * a manager built against an older UAPI (e.g. MamboSU on UAPI 5) keeps its
++ * root-only screens on a kernel that already moved to a newer UAPI. The newer
++ * UAPI is additive, so downgrading the reported number is safe.
++ *
++ * Forks that track upstream report the kernel's own KERNEL_SU_UAPI_VERSION.
++ */
++unsigned ksu_current_manager_uapi_version(void)
++{
++    struct ksu_manager_node *pos;
++    u16 appid;
++    unsigned uapi_version = KERNEL_SU_UAPI_VERSION;
++
++    if (!is_manager())
++        return KERNEL_SU_UAPI_VERSION;
++
++    appid = ksu_get_uid_t(current_uid()) % PER_USER_RANGE;
++
++    rcu_read_lock();
++    list_for_each_entry_rcu (pos, &ksu_manager_appid_list, list) {
++        if (pos->appid == appid) {
++            if (pos->uapi_version)
++                uapi_version = pos->uapi_version;
++            break;
++        }
++    }
++    rcu_read_unlock();
++
++    return uapi_version;
++}
+diff --git a/kernel/manager/manager_identity.h b/kernel/manager/manager_identity.h
+index 08d5e923..d21f62cd 100644
+--- a/kernel/manager/manager_identity.h
++++ b/kernel/manager/manager_identity.h
+@@ -49,6 +49,12 @@ static inline int ksu_get_manager_signature_index_by_appid(u16 appid)
+     return -EOPNOTSUPP;
+ }
+ 
++// 0 = unknown: the caller falls back to KERNEL_SU_UAPI_VERSION.
++static inline unsigned ksu_current_manager_uapi_version(void)
++{
++    return 0;
++}
++
+ static inline bool ksu_has_manager(void)
+ {
+     return true;
+@@ -71,6 +77,7 @@ extern void ksu_unregister_manager(u32 uid);
+ extern void ksu_unregister_manager_by_signature_index(u8 signature_index);
+ extern void ksu_unregister_all_manager(void);
+ extern int ksu_get_manager_signature_index_by_appid(u16 appid);
++extern unsigned ksu_current_manager_uapi_version(void);
+ extern bool ksu_has_manager(void);
+ #endif
+ 
+diff --git a/kernel/manager/manager_sign.h b/kernel/manager/manager_sign.h
+index a940135d..1fa2d53e 100644
+--- a/kernel/manager/manager_sign.h
++++ b/kernel/manager/manager_sign.h
+@@ -13,9 +13,26 @@
+ #define EXPECTED_SIZE_KOWX712 0x375
+ #define EXPECTED_HASH_KOWX712 "484fcba6e6c43b1fb09700633bf2fb4758f13cb0b2f4457b80d075084b26c588"
+ 
++// rifsxd/KernelSU-Next
++#define EXPECTED_SIZE_KSUNEXT 0x3e6
++#define EXPECTED_HASH_KSUNEXT "79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7"
++
++// RapliVx/MamboSU
++#define EXPECTED_SIZE_MAMBOSU 0x384
++#define EXPECTED_HASH_MAMBOSU "a9462b8b98ea1ca7901b0cbdcebfaa35f0aa95e51b01d66e6b6d2c81b97746d8"
++
++// LyraVoid/FinaSU
++#define EXPECTED_SIZE_FINASU 0x2cc
++#define EXPECTED_HASH_FINASU "2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458"
++
+ typedef struct {
+     unsigned size;
+     const char *sha256;
++    // UAPI version this manager build was compiled against. 0 means "follow the
++    // kernel" (KERNEL_SU_UAPI_VERSION), which is the right value for any fork
++    // that tracks upstream. Only forks that lag behind need an explicit number,
++    // and the line can be dropped again once they catch up.
++    unsigned uapi_version;
+ } apk_sign_key_t;
+ 
+ #endif /* MANAGER_SIGN_H */
+diff --git a/kernel/supercall/dispatch.c b/kernel/supercall/dispatch.c
+index c23a7cb4..14738d26 100644
+--- a/kernel/supercall/dispatch.c
++++ b/kernel/supercall/dispatch.c
+@@ -90,7 +90,12 @@ static int do_get_info(void __user *arg)
+         cmd.flags |= KSU_GET_INFO_FLAG_PREINIT;
+     }
+     cmd.features = KSU_FEATURE_MAX;
+-    cmd.uapi_version = KERNEL_SU_UAPI_VERSION;
++    // Report the UAPI version of the manager that is actually asking, instead of
++    // one global value: a manager built for an older (additive) UAPI then keeps
++    // its root-only screens instead of silently dropping them.
++    cmd.uapi_version = ksu_current_manager_uapi_version();
++    if (!cmd.uapi_version)
++        cmd.uapi_version = KERNEL_SU_UAPI_VERSION;
+ 
+ #ifdef CONFIG_KSU_TOOLKIT_SUPPORT
+     if (ksuver_override)
