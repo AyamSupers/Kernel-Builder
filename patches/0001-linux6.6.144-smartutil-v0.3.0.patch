@@ -1,15 +1,15 @@
-From 057e3ba1cc36273e59165c2156873dfc39880c72 Mon Sep 17 00:00:00 2001
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Artecxyz <artecxyz@local>
-Date: Sat, 31 Oct 2026 01:19:05 +0700
+Date: Sat, 31 Oct 2026 23:38:29 +0700
 Subject: [PATCH] Smartutil CPUFreq Governor v0.3.0
 
 ---
  drivers/cpufreq/Kconfig             |   26 +
  drivers/cpufreq/Makefile            |    1 +
- drivers/cpufreq/cpufreq_smartutil.c | 1561 +++++++++++++++++++++++++++
- include/linux/sched/cpufreq.h       |   10 +
- kernel/sched/cpufreq.c              |   13 +
- 5 files changed, 1611 insertions(+)
+ drivers/cpufreq/cpufreq_smartutil.c | 1688 ++++++++++++++++++++++++++++++++
+ include/linux/sched/cpufreq.h       |   11 +
+ kernel/sched/cpufreq.c              |   28 +
+ 5 files changed, 1754 insertions(+)
  create mode 100644 drivers/cpufreq/cpufreq_smartutil.c
 
 diff --git a/drivers/cpufreq/Kconfig b/drivers/cpufreq/Kconfig
@@ -63,10 +63,10 @@ index e2657bf89735..9efcb6dd7a43 100644
  obj-$(CONFIG_CPUFREQ_DT_PLATDEV)	+= cpufreq-dt-platdev.o
 diff --git a/drivers/cpufreq/cpufreq_smartutil.c b/drivers/cpufreq/cpufreq_smartutil.c
 new file mode 100644
-index 000000000000..3fbdeb947b91
+index 000000000000..e29416c72688
 --- /dev/null
 +++ b/drivers/cpufreq/cpufreq_smartutil.c
-@@ -0,0 +1,1561 @@
+@@ -0,0 +1,1688 @@
 +// SPDX-License-Identifier: GPL-2.0
 +/*
 + * Smartutil CPUFreq governor (based on schedutil)
@@ -79,7 +79,7 @@ index 000000000000..3fbdeb947b91
 + * PELT is frequency-invariant and low-passed by PELT itself, so the
 + * signal that reaches the mapping is schedutil's, unaltered: this
 + * governor adds nothing to it.  What it adds is a floor.  Each CPU
-+ * closes intervals of at least max(min_rate_limit_ns, 1 tick) and reads
++ * closes intervals of at least max(rate_limit_ns, 1 tick) and reads
 + * kcpustat's idle time over one -- an interval with idle shows the CPU
 + * is keeping up, one with none is the only evidence there is that it is
 + * not.  p, the probability the CPU is behind its work, is a leaky
@@ -92,6 +92,24 @@ index 000000000000..3fbdeb947b91
 + * ceiling, then floored at s*(p * lambda): the speed minimizing energy
 + * plus latency per unit of work, from the Energy Model or a cube law.
 + * lambda is the latency_weight tunable, per mille of lambda_max.
++ *
++ * Everything else is schedutil's, and that includes the part which does
++ * most of the work of keeping it calm: on the single-CPU paths a request
++ * that would lower the frequency is dropped while the CPU has not been
++ * idle since the last update, because a run of work still going is not a
++ * load that has gone away.  Without it the governor answers every dip in
++ * PELT with a transition, and PELT dips all day.
++ *
++ * The rate limit is one number rather than schedutil's per-policy
++ * figure, and it only ever holds a fall: a rise is a decision that
++ * cannot wait, since nothing promises the scheduler will ask again once
++ * the limit expires.  Where utilization is not tracked
++ * frequency-invariantly -- which is the case for a setpolicy driver, or
++ * where the counters the core would read are not there -- the limit
++ * applies to both directions, as it must there.  Every driver that
++ * implements target(), target_index() or fast_switch() reports
++ * invariance, so in practice this is the common case, not the exotic
++ * one.
 + */
 +
 +#include <linux/arch_topology.h>
@@ -114,6 +132,7 @@ index 000000000000..3fbdeb947b91
 +#include <linux/slab.h>
 +#include <linux/spinlock.h>
 +#include <linux/string.h>
++#include <linux/tick.h>
 +#include <uapi/linux/sched/types.h>
 +#include <trace/hooks/sched.h>
 +
@@ -158,8 +177,27 @@ index 000000000000..3fbdeb947b91
 +struct smut_tunables {
 +	struct gov_attr_set	attr_set;
 +
-+	unsigned int		up_rate_limit_us;
-+	unsigned int		down_rate_limit_us;
++	/*
++	 * One rate limit, in microseconds, and it only ever gates a
++	 * transition _down_.
++	 *
++	 * schedutil's own limit is taken from
++	 * cpufreq_policy_transition_delay_us() and applies to both
++	 * directions.  Dropping a frequency is a decision that can wait a
++	 * tick and lose nothing; raising one is a decision that cannot,
++	 * because nothing guarantees the scheduler will call back once the
++	 * limit expires -- a CPU that stays in a long preempt/IRQs-off
++	 * stretch, or one running a task with UCLAMP_MIN, can sit at a
++	 * frequency it has outgrown for as long as it takes to be asked
++	 * again.  So when the scheduler tracks utilization in a
++	 * frequency-invariant way, which is the only case where waiting
++	 * buys nothing, a rise is not delayed at all.
++	 *
++	 * That leaves one number instead of two, and the number means
++	 * "how long a fall must wait", which is the half of the question
++	 * that is actually about energy.
++	 */
++	unsigned int		rate_limit_us;
 +
 +	/*
 +	 * Headroom on top of the proportional mapping, in percent, applied
@@ -198,9 +236,7 @@ index 000000000000..3fbdeb947b91
 +
 +	raw_spinlock_t		update_lock;
 +	u64			last_freq_update_time;
-+	s64			min_rate_limit_ns;
-+	s64			up_rate_delay_ns;
-+	s64			down_rate_delay_ns;
++	s64			rate_limit_ns;
 +	unsigned int		next_freq;
 +	unsigned int		cached_raw_freq;
 +
@@ -241,6 +277,14 @@ index 000000000000..3fbdeb947b91
 +	unsigned long		bw_max;
 +
 +	/*
++	 * The field below is for single-CPU policies only: the count of
++	 * times this CPU has entered nohz idle, as of the last update.
++	 */
++#ifdef CONFIG_NO_HZ_COMMON
++	unsigned long		saved_idle_calls;
++#endif
++
++	/*
 +	 * The lateness signal, closed on this CPU only: kcpustat of a
 +	 * remote CPU would be read with this CPU's clock.
 +	 */
@@ -267,50 +311,25 @@ index 000000000000..3fbdeb947b91
 +
 +static DEFINE_PER_CPU(struct smut_cpu, smut_cpu);
 +
-+/*
-+ * Protects min_rate_limit_ns across all policies sharing one tunables set,
-+ * since two rate limits can be written concurrently.
-+ */
-+static DEFINE_MUTEX(smut_min_rate_lock);
-+
 +/************************ Governor internals ***********************/
 +
-+static void smut_update_min_rate_limit_ns(struct smut_policy *sg_policy)
++static void smut_update_rate_limit_ns(struct smut_policy *sg_policy)
 +{
-+	mutex_lock(&smut_min_rate_lock);
-+	sg_policy->min_rate_limit_ns =
-+		min(sg_policy->up_rate_delay_ns, sg_policy->down_rate_delay_ns);
-+	mutex_unlock(&smut_min_rate_lock);
++	sg_policy->rate_limit_ns =
++		sg_policy->tunables->rate_limit_us * NSEC_PER_USEC;
 +
 +	/*
 +	 * The measured-demand interval follows the governor's own pace: an
 +	 * interval shorter than a tick can be all busy by chance, which tells
 +	 * nothing about falling behind.
 +	 */
-+	sg_policy->sample_delay_ns = max_t(s64, sg_policy->min_rate_limit_ns,
++	sg_policy->sample_delay_ns = max_t(s64, sg_policy->rate_limit_ns,
 +				   TICK_NSEC);
 +}
 +
-+static bool smut_up_down_rate_limit(struct smut_policy *sg_policy, u64 time,
-+				    unsigned int next_freq)
++static bool smut_should_rate_limit(struct smut_policy *sg_policy, u64 time)
 +{
-+	s64 delta_ns = time - sg_policy->last_freq_update_time;
-+
-+	/*
-+	 * If the frequency is being raised, the up rate limit applies; if it
-+	 * is being lowered, the down rate limit does. A transition is only
-+	 * throttled by the limit of the direction it is actually moving in,
-+	 * so the two knobs can never block each other.
-+	 */
-+	if (next_freq > sg_policy->next_freq &&
-+	    delta_ns < sg_policy->up_rate_delay_ns)
-+		return true;
-+
-+	if (next_freq < sg_policy->next_freq &&
-+	    delta_ns < sg_policy->down_rate_delay_ns)
-+		return true;
-+
-+	return false;
++	return time - sg_policy->last_freq_update_time < sg_policy->rate_limit_ns;
 +}
 +
 +static bool smut_should_update_freq(struct smut_policy *sg_policy, u64 time)
@@ -337,12 +356,17 @@ index 000000000000..3fbdeb947b91
 +	}
 +
 +	/*
-+	 * Nothing to gain from recalculating next freq again before
-+	 * min_rate_limit_ns has elapsed; the direction-specific limits are
-+	 * applied later, once the direction is known.
++	 * Nothing to gain from recalculating next freq before
++	 * rate_limit_ns has elapsed -- except that with frequency-invariant
++	 * utilization there is everything to gain from recalculating it,
++	 * because the answer may be a rise, and a rise is never held back.
++	 * The limit is checked again once the direction is known; see
++	 * smut_update_next_freq().
 +	 */
-+	return time - sg_policy->last_freq_update_time >=
-+		sg_policy->min_rate_limit_ns;
++	if (arch_scale_freq_invariant())
++		return true;
++
++	return !smut_should_rate_limit(sg_policy, time);
 +}
 +
 +static bool smut_update_next_freq(struct smut_policy *sg_policy, u64 time,
@@ -357,20 +381,25 @@ index 000000000000..3fbdeb947b91
 +		 * callback need not be invoked unless the driver specifically
 +		 * wants that on every policy limits update.
 +		 */
-+		if (sg_policy->next_freq == next_freq &&
-+		    !cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS))
-+			return false;
-+	} else if (sg_policy->next_freq == next_freq) {
-+		return false;
++		if (cpufreq_driver_test_flags(CPUFREQ_NEED_UPDATE_LIMITS))
++			goto must_update;
 +	}
 +
 +	/*
-+	 * Now that the direction of the transition is known, apply the rate
-+	 * limit for that direction only.
++	 * Nothing to do if the frequency is unchanged, or if it is falling
++	 * and the limit has not expired.  A rise skips the limit entirely
++	 * here, which is what lets smut_should_update_freq() ignore it
++	 * above; the check is repeated for every transition rather than
++	 * only for the ones smut_should_update_freq() admitted, because
++	 * that is cheaper than another call to
++	 * arch_scale_freq_invariant().
 +	 */
-+	if (smut_up_down_rate_limit(sg_policy, time, next_freq))
++	if (next_freq == sg_policy->next_freq ||
++	    (next_freq < sg_policy->next_freq &&
++	     smut_should_rate_limit(sg_policy, time)))
 +		return false;
 +
++must_update:
 +	sg_policy->next_freq = next_freq;
 +	sg_policy->last_freq_update_time = time;
 +
@@ -747,6 +776,24 @@ index 000000000000..3fbdeb947b91
 +	return min_t(u64, div64_u64((u64)floor * max_cap, ref), max_cap);
 +}
 +
++/*
++ * schedutil's map_util_perf(): one fixed margin on top of the utilization,
++ * whatever uclamp and PELT have already agreed on.
++ *
++ * It is applied to the signal rather than to the frequency it maps to.
++ * The two agree, because the mapping is linear, but the vendor hook in
++ * between then sees the same boosted utilization schedutil hands it --
++ * and with CONFIG_ANDROID_VENDOR_HOOKS set it is that hook which decides
++ * the frequency on most of these platforms.
++ */
++static inline unsigned long smut_util_perf(struct smut_policy *sg_policy,
++					   unsigned long util)
++{
++	unsigned int pct = READ_ONCE(sg_policy->tunables->headroom_pct);
++
++	return util + (unsigned long)((u64)util * pct / 100);
++}
++
 +/**
 + * smut_next_freq - Compute a new frequency for a given cpufreq policy.
 + * @sg_policy: smartutil policy object to compute the new frequency for.
@@ -782,27 +829,28 @@ index 000000000000..3fbdeb947b91
 +				   unsigned int floor)
 +{
 +	struct cpufreq_policy *policy = sg_policy->policy;
-+	struct smut_tunables *tunables = sg_policy->tunables;
-+	unsigned int freq, cap;
++	unsigned int freq, cap, resolved_freq;
 +	unsigned long next_freq = 0;
 +
 +	cap = READ_ONCE(sg_policy->cap);
 +	freq = smut_capacity_ref_freq(policy);
++
++	/*
++	 * One headroom, at every load, and it goes on the utilization
++	 * before it reaches the hook -- exactly where schedutil's
++	 * map_util_perf() puts it.  The mapping is linear, so boosting the
++	 * input and multiplying the output agree to the kHz; what is not
++	 * the same is what the hook sees, and the hook is what picks the
++	 * frequency on most of these platforms.
++	 */
++	util = smut_util_perf(sg_policy, util);
 +
 +	trace_android_vh_map_util_freq(util, freq, max, &next_freq, policy,
 +				       &sg_policy->need_freq_update);
 +	if (next_freq) {
 +		freq = next_freq;
 +	} else {
-+		/*
-+		 * One headroom, at every load.  schedutil's map_util_perf()
-+		 * does exactly this and it is a large part of why that governor
-+		 * is calm; the tiers that used to decide it per load range were
-+		 * a gain that moved with the load.
-+		 */
 +		freq = map_util_freq(util, freq, max);
-+		freq += (unsigned int)((u64)freq *
-+				     READ_ONCE(tunables->headroom_pct) / 100);
 +
 +		freq = min_t(unsigned int, freq, cap);
 +
@@ -817,7 +865,30 @@ index 000000000000..3fbdeb947b91
 +	if (freq == sg_policy->cached_raw_freq && !sg_policy->need_freq_update)
 +		return sg_policy->next_freq;
 +	sg_policy->cached_raw_freq = freq;
-+	return cpufreq_driver_resolve_freq(policy, freq);
++
++	resolved_freq = cpufreq_driver_resolve_freq(policy, freq);
++
++	/*
++	 * If the target frequency is less than 20% above the lower
++	 * frequency, use that lower frequency.
++	 */
++	if (resolved_freq > freq) {
++		unsigned int l_freq =
++			cpufreq_driver_resolve_freq(policy, freq - 1);
++
++		if (freq - l_freq < l_freq / 5)
++			resolved_freq = l_freq;
++	}
++
++	/*
++	 * The floor is a latency promise and the rounding above must not
++	 * eat it.  The ceiling needs no such care: it can only be rounded
++	 * down from, never up into.
++	 */
++	if (floor)
++		resolved_freq = max_t(unsigned int, resolved_freq, floor);
++
++	return resolved_freq;
 +}
 +
 +/*
@@ -835,10 +906,11 @@ index 000000000000..3fbdeb947b91
 +	sg_cpu->bw_max = max;
 +
 +	/*
-+	 * No map_util_perf() headroom here: the signal that reaches the
-+	 * mapping is PELT's, low-passed by PELT itself, and nothing of this
-+	 * governor's is added to it.  headroom_pct is applied once, in
-+	 * smut_next_freq(), where it can be seen.
++	 * No headroom here: the signal that reaches the mapping is PELT's,
++	 * low-passed by PELT itself, and nothing of this governor's is
++	 * added to it.  headroom_pct is applied once, as schedutil's
++	 * map_util_perf() is, just before the vendor hook -- see
++	 * smut_util_perf().
 +	 */
 +	if (util < max)
 +		max = util;
@@ -962,6 +1034,32 @@ index 000000000000..3fbdeb947b91
 +}
 +
 +/*
++ * Whether this CPU has been idle since the governor last looked.
++ *
++ * The nohz idle-entry counter only moves when the CPU actually goes
++ * idle, so an unchanged count means it has not: every interval since the
++ * last update was spent running something.  A utilization that has
++ * fallen in the meantime is a run of work ending, not a load going away,
++ * and paying a transition for it buys nothing.
++ *
++ * This is the whole of schedutil's answer to a twitchy frequency, and it
++ * is only meaningful on the single-CPU paths, where the callback is for
++ * one CPU and its rq is held.
++ */
++#ifdef CONFIG_NO_HZ_COMMON
++static bool smut_cpu_is_busy(struct smut_cpu *sg_cpu)
++{
++	unsigned long idle_calls = tick_nohz_get_idle_calls_cpu(sg_cpu->cpu);
++	bool ret = idle_calls == sg_cpu->saved_idle_calls;
++
++	sg_cpu->saved_idle_calls = idle_calls;
++	return ret;
++}
++#else
++static inline bool smut_cpu_is_busy(struct smut_cpu *sg_cpu) { return false; }
++#endif /* CONFIG_NO_HZ_COMMON */
++
++/*
 + * Make smut_should_update_freq() ignore the rate limit when DL
 + * has increased the utilization.
 + */
@@ -998,6 +1096,7 @@ index 000000000000..3fbdeb947b91
 +{
 +	struct smut_cpu *sg_cpu = container_of(hook, struct smut_cpu, update_util);
 +	struct smut_policy *sg_policy = sg_cpu->sg_policy;
++	unsigned int cached_freq = sg_policy->cached_raw_freq;
 +	unsigned long max_cap;
 +	unsigned int next_f;
 +
@@ -1008,6 +1107,21 @@ index 000000000000..3fbdeb947b91
 +
 +	next_f = smut_next_freq(sg_policy, sg_cpu->util, max_cap,
 +			       smut_floor(sg_cpu, max_cap));
++
++	/*
++	 * Do not reduce the frequency if the CPU has not been idle
++	 * recently, as the reduction is likely to be premature then.
++	 *
++	 * Except when the rq is capped by uclamp_max.
++	 */
++	if (!cpufreq_rq_is_capped(sg_cpu->cpu) &&
++	    smut_cpu_is_busy(sg_cpu) && next_f < sg_policy->next_freq &&
++	    !sg_policy->need_freq_update) {
++		next_f = sg_policy->next_freq;
++
++		/* Restore cached freq as next_freq has changed */
++		sg_policy->cached_raw_freq = cached_freq;
++	}
 +
 +	if (!smut_update_next_freq(sg_policy, time, next_f))
 +		return;
@@ -1030,6 +1144,7 @@ index 000000000000..3fbdeb947b91
 +				     unsigned int flags)
 +{
 +	struct smut_cpu *sg_cpu = container_of(hook, struct smut_cpu, update_util);
++	unsigned long prev_util = sg_cpu->util;
 +	unsigned long max_cap;
 +
 +	/*
@@ -1048,13 +1163,28 @@ index 000000000000..3fbdeb947b91
 +		return;
 +
 +	/*
-+	 * The floor is handed over in capacity units. The heat ceiling is a
-+	 * frequency-path knob and does not apply here, just like the
-+	 * headroom.
++	 * Do not reduce the target performance level if the CPU has not
++	 * been idle recently, as the reduction is likely to be premature
++	 * then.
++	 *
++	 * Except when the rq is capped by uclamp_max.
 +	 */
-+	cpufreq_driver_adjust_perf(sg_cpu->cpu, sg_cpu->bw_dl,
-+				   max(sg_cpu->util,
-+				       smut_floor_util(sg_cpu, max_cap)),
++	if (!cpufreq_rq_is_capped(sg_cpu->cpu) &&
++	    smut_cpu_is_busy(sg_cpu) && sg_cpu->util < prev_util)
++		sg_cpu->util = prev_util;
++
++	/*
++	 * The floor is handed over in capacity units. The heat ceiling is a
++	 * frequency-path knob and does not apply here, and the headroom
++	 * goes on both arguments exactly as schedutil's map_util_perf()
++	 * puts it there.
++	 */
++	cpufreq_driver_adjust_perf(sg_cpu->cpu,
++				   smut_util_perf(sg_cpu->sg_policy, sg_cpu->bw_dl),
++				   smut_util_perf(sg_cpu->sg_policy,
++						  max(sg_cpu->util,
++						      smut_floor_util(sg_cpu,
++								      max_cap))),
 +				   max_cap);
 +
 +	sg_cpu->sg_policy->last_freq_update_time = time;
@@ -1222,9 +1352,9 @@ index 000000000000..3fbdeb947b91
 +static struct governor_attr name = __ATTR_RW(name)
 +
 +/*
-+ * Rate limits also live in struct smut_policy (as nanoseconds), so they
-+ * have to be pushed into every bound policy, and min_rate_limit_ns
-+ * recomputed since either limit can now be the smaller of the two.
++ * The rate limit also lives in struct smut_policy (as nanoseconds), so it
++ * has to be pushed into every bound policy, and the sampling interval
++ * recomputed since it follows the governor's pace.
 + */
 +#define SMUT_RATE_LIMIT_RW(name, field)					\
 +static ssize_t name##_show(struct gov_attr_set *attr_set, char *buf)	\
@@ -1247,7 +1377,7 @@ index 000000000000..3fbdeb947b91
 +									\
 +	list_for_each_entry(sg_policy, &attr_set->policy_list, tunables_hook) { \
 +		sg_policy->field = val * NSEC_PER_USEC;			\
-+		smut_update_min_rate_limit_ns(sg_policy);		\
++		smut_update_rate_limit_ns(sg_policy);			\
 +	}								\
 +									\
 +	return count;							\
@@ -1255,8 +1385,7 @@ index 000000000000..3fbdeb947b91
 +									\
 +static struct governor_attr name = __ATTR_RW(name)
 +
-+SMUT_RATE_LIMIT_RW(up_rate_limit_us, up_rate_delay_ns);
-+SMUT_RATE_LIMIT_RW(down_rate_limit_us, down_rate_delay_ns);
++SMUT_RATE_LIMIT_RW(rate_limit_us, rate_limit_ns);
 +
 +SMUT_TUNABLE_RW(headroom_pct);
 +
@@ -1270,8 +1399,7 @@ index 000000000000..3fbdeb947b91
 +		smut_speed_floors);
 +
 +static struct attribute *smut_attrs[] = {
-+	&up_rate_limit_us.attr,
-+	&down_rate_limit_us.attr,
++	&rate_limit_us.attr,
 +	&headroom_pct.attr,
 +	&cap_power.attr,
 +	&latency_weight.attr,
@@ -1455,12 +1583,14 @@ index 000000000000..3fbdeb947b91
 +	 * Defaults, kept conservative so nothing changes behaviour
 +	 * dramatically before the owner has calibrated on real hardware.
 +	 *
-+	 * The two rate-limit directions are explicit rather than taken from
-+	 * cpufreq_policy_transition_delay_us() so they stay independently
-+	 * tunable.  Everything else is one number:
++	 * The rate limit is explicit rather than taken from
++	 * cpufreq_policy_transition_delay_us(), because it is deliberately
++	 * shorter than that and only applies in one direction.
++	 * Everything else is one number:
 +	 *
-+	 *  - up_rate_limit_us   1ms : react quickly when load appears
-+	 *  - down_rate_limit_us 2ms : let an idle CPU fall to policy->min
++	 *  - rate_limit_us    2ms : how long a fall must wait; a rise is
++	 *                          never delayed when utilization is
++	 *                          tracked frequency-invariantly
 +	 *  - headroom_pct       25  : schedutil's own figure, so the two
 +	 *                             governors agree at light load instead
 +	 *                             of this one running the CPU lower
@@ -1478,8 +1608,7 @@ index 000000000000..3fbdeb947b91
 +	 *                             tables scale with the policy's fmax;
 +	 *                             cap_power bounds it either way
 +	 */
-+	tunables->up_rate_limit_us	= 1000;
-+	tunables->down_rate_limit_us	= 2000;
++	tunables->rate_limit_us		= 2000;
 +	tunables->headroom_pct		= 25;
 +	tunables->cap_power		= SMUT_CAP_POWER;
 +	tunables->latency_weight	= SMUT_LATENCY_WEIGHT_DEF;
@@ -1541,11 +1670,9 @@ index 000000000000..3fbdeb947b91
 +	void (*uu)(struct update_util_data *data, u64 time, unsigned int flags);
 +	unsigned int cpu;
 +
-+	sg_policy->up_rate_delay_ns =
-+		sg_policy->tunables->up_rate_limit_us * NSEC_PER_USEC;
-+	sg_policy->down_rate_delay_ns =
-+		sg_policy->tunables->down_rate_limit_us * NSEC_PER_USEC;
-+	smut_update_min_rate_limit_ns(sg_policy);
++	sg_policy->rate_limit_ns =
++		sg_policy->tunables->rate_limit_us * NSEC_PER_USEC;
++	smut_update_rate_limit_ns(sg_policy);
 +	smut_speed_floors(sg_policy);
 +	sg_policy->last_freq_update_time	= 0;
 +	sg_policy->next_freq			= 0;
@@ -1629,10 +1756,10 @@ index 000000000000..3fbdeb947b91
 +MODULE_LICENSE("GPL");
 +MODULE_DESCRIPTION(CPUFREQ_SMARTUTIL_PROGNAME);
 diff --git a/include/linux/sched/cpufreq.h b/include/linux/sched/cpufreq.h
-index bdd31ab93bc5..7aa8cfd2cf33 100644
+index bdd31ab93bc5..35e3eb623c1d 100644
 --- a/include/linux/sched/cpufreq.h
 +++ b/include/linux/sched/cpufreq.h
-@@ -33,6 +33,16 @@ static inline unsigned long map_util_perf(unsigned long util)
+@@ -33,6 +33,17 @@ static inline unsigned long map_util_perf(unsigned long util)
  {
  	return util + (util >> 2);
  }
@@ -1645,15 +1772,16 @@ index bdd31ab93bc5..7aa8cfd2cf33 100644
 +unsigned long effective_cpu_util(int cpu, unsigned long util,
 +				 unsigned long *min, unsigned long *max);
 +unsigned long cpu_util_cfs_boost(int cpu);
++bool cpufreq_rq_is_capped(int cpu);
 +
  #endif /* CONFIG_CPU_FREQ */
  
  #endif /* _LINUX_SCHED_CPUFREQ_H */
 diff --git a/kernel/sched/cpufreq.c b/kernel/sched/cpufreq.c
-index 29e4e0d84452..8947652223ea 100644
+index 29e4e0d84452..cd5b5588f07e 100644
 --- a/kernel/sched/cpufreq.c
 +++ b/kernel/sched/cpufreq.c
-@@ -74,3 +74,16 @@ bool cpufreq_this_cpu_can_update(struct cpufreq_policy *policy)
+@@ -74,3 +74,31 @@ bool cpufreq_this_cpu_can_update(struct cpufreq_policy *policy)
  		 rcu_dereference_sched(*this_cpu_ptr(&cpufreq_update_util_data)));
  }
  EXPORT_SYMBOL_GPL(cpufreq_this_cpu_can_update);
@@ -1670,6 +1798,18 @@ index 29e4e0d84452..8947652223ea 100644
 +{
 +	return cpu_bw_dl(cpu_rq(cpu));
 +}
--- 
-2.56.0
-
++
++/**
++ * cpufreq_rq_is_capped - whether a CPU's runqueue is capped by uclamp_max.
++ * @cpu: the CPU in question.
++ *
++ * uclamp_rq_is_capped() is a static inline in kernel/sched/sched.h, for
++ * the same reason cpu_bw_dl() is: a governor compiled as its own object
++ * in drivers/cpufreq/ cannot reach it.  Governors need it to tell a dip
++ * in utilization they should ride out from one they should honour -- a
++ * ceiling the user asked for is not a dip.
++ */
++bool cpufreq_rq_is_capped(int cpu)
++{
++	return uclamp_rq_is_capped(cpu_rq(cpu));
++}
